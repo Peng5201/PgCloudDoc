@@ -1,0 +1,9 @@
+packages:
+  - 'frontend'
+  - 'backend'
+
+allowBuilds:
+  '@parcel/watcher': true
+  esbuild: true
+  protobufjs: true
+  unrs-resolver: true
