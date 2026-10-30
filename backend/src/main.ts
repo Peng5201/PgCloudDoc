@@ -27,6 +27,7 @@ import { AppModule } from './app.module';
 import { AppConfigService } from './config/app-config.service';
 import { AppError } from './common/errors/app-error';
 import { CollabServer } from './modules/collab/collab.server';
+import { NotificationGateway } from './modules/notifications/notification.gateway';
 
 async function bootstrap(): Promise<void> {
     const app = await NestFactory.create<NestExpressApplication>(AppModule, {
@@ -144,6 +145,7 @@ async function bootstrap(): Promise<void> {
     // 挂到同一个 HTTP server 上，共用端口（走 HTTP Upgrade）
     const httpServer = app.getHttpServer() as unknown as import('node:http').Server;
     app.get(CollabServer).attach(httpServer);
+    app.get(NotificationGateway).attach(httpServer);
 
     await app.listen(config.port);
 
@@ -151,6 +153,7 @@ async function bootstrap(): Promise<void> {
     logger.log(`服务已启动：http://localhost:${config.port}`);
     logger.log(`健康检查：http://localhost:${config.port}/health/ready`);
     logger.log(`协同入口：ws://localhost:${config.port}/collab/:documentId`);
+    logger.log(`通知入口：ws://localhost:${config.port}/notifications`);
 }
 
 void bootstrap();

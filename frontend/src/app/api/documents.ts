@@ -35,11 +35,31 @@ export interface DocumentVersion {
     createdAt: string;
 }
 
+export interface Member {
+    userId: string;
+    role: 'OWNER' | 'EDITOR' | 'VIEWER';
+    email: string;
+    username: string;
+    displayName: string | null;
+}
+
+export interface AccessRequest {
+    id: string;
+    requesterId: string;
+    requesterEmail: string;
+    requesterUsername: string;
+    requesterDisplayName: string | null;
+    status: 'PENDING' | 'APPROVED' | 'REJECTED';
+    decidedRole: 'EDITOR' | 'VIEWER' | null;
+    createdAt: string;
+    decidedAt: string | null;
+}
+
 export interface PageResult<T> {
     items: T[];
     nextCursor: string | null;
     hasMore: boolean;
-}
+} 
 
 export interface ListQuery {
     cursor?: string;
@@ -108,11 +128,14 @@ export const documentsApi = {
         return (await response.json()) as IWorkbookData;
     },
 
-    /** 存一版（「保存」按钮） */
-    archive(id: string, remark?: string): Promise<{ versionNo: number }> {
-        return api.post<{ versionNo: number }>(`/api/v1/documents/${id}/archive`, {
-            remark,
-        });
+    /** 存一版（「保存为版本」）。created=false 表示内容没变、没有新增版本 */
+    archive(id: string, remark?: string): Promise<{ versionNo: number; created: boolean }> {
+        return api.post<{ versionNo: number; created: boolean }>(
+            `/api/v1/documents/${id}/archive`,
+            {
+                remark,
+            }
+        );
     },
 
     versions(id: string): Promise<DocumentVersion[]> {
@@ -130,5 +153,41 @@ export const documentsApi = {
         return api.post<{ accepted: true }>(
             `/api/v1/documents/${id}/refresh-snapshot?reason=${encodeURIComponent(reason)}`
         );
+    },
+
+    // ─────────────────────── 权限协作 ───────────────────────
+
+    members(id: string): Promise<Member[]> {
+        return api.get<Member[]>(`/api/v1/documents/${id}/members`);
+    },
+
+    updateMemberRole(id: string, userId: string, role: 'EDITOR' | 'VIEWER'): Promise<void> {
+        return api.patch<void>(`/api/v1/documents/${id}/members/${userId}`, { role });
+    },
+
+    removeMember(id: string, userId: string): Promise<void> {
+        return api.delete<void>(`/api/v1/documents/${id}/members/${userId}`);
+    },
+
+    requestAccess(id: string): Promise<void> {
+        return api.post<void>(`/api/v1/documents/${id}/access-requests`);
+    },
+
+    accessRequests(id: string): Promise<AccessRequest[]> {
+        return api.get<AccessRequest[]>(`/api/v1/documents/${id}/access-requests`);
+    },
+
+    approveAccessRequest(
+        id: string,
+        requestId: string,
+        role: 'EDITOR' | 'VIEWER'
+    ): Promise<void> {
+        return api.post<void>(`/api/v1/documents/${id}/access-requests/${requestId}/approve`, {
+            role,
+        });
+    },
+
+    rejectAccessRequest(id: string, requestId: string): Promise<void> {
+        return api.post<void>(`/api/v1/documents/${id}/access-requests/${requestId}/reject`);
     },
 };

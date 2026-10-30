@@ -11,6 +11,7 @@
 
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../infra/prisma/prisma.service';
+import { AccessRequestStatus, MemberRole } from '../../infra/prisma/generated/client';
 import type { Prisma } from '../../infra/prisma/generated/client';
 
 export type DbClient = Prisma.TransactionClient | PrismaService;
@@ -31,6 +32,8 @@ export interface DocumentListRow {
     owner_username: string;
     owner_display_name: string;
     version_count: bigint;
+    /** 当前用户在 document_members 里的角色（owner 不在 members 表，为 null） */
+    member_role: string | null;
 }
 
 export interface ListOptions {
@@ -41,6 +44,30 @@ export interface ListOptions {
     cursorUpdatedAt?: Date;
     cursorId?: string;
     limit: number;
+}
+
+/** document_members 一行（已 join 用户信息） */
+export interface MemberRow {
+    user_id: string;
+    role: string;
+    email: string;
+    username: string;
+    display_name: string | null;
+    joined_at: Date;
+}
+
+/** document_access_requests 一行（已 join 申请人信息） */
+export interface AccessRequestRow {
+    id: string;
+    document_id: string;
+    requester_id: string;
+    status: string;
+    decided_role: string | null;
+    created_at: Date;
+    decided_at: Date | null;
+    requester_email: string;
+    requester_username: string;
+    requester_display_name: string | null;
 }
 
 @Injectable()
@@ -58,7 +85,8 @@ export class DocumentRepository {
      */
     async findManyForList(options: ListOptions): Promise<DocumentListRow[]> {
         // 动态拼条件：$queryRaw 的参数化只能用在值上，条件本身得拼字符串
-        const wheres: string[] = ['d.owner_id = $1'];
+        // 列表范围 = 我拥有 + 我参与（document_members 里有我）
+        const wheres: string[] = ['(d.owner_id = $1 OR m.document_id IS NOT NULL)'];
         const values: unknown[] = [options.ownerId];
         let idx = 2;
 
@@ -85,8 +113,10 @@ export class DocumentRepository {
         values.push(options.limit);
 
         const sql = `
-            SELECT *
+            SELECT d.*, m.role AS member_role
               FROM v_document_list d
+              LEFT JOIN document_members m
+                ON m.document_id = d.id AND m.user_id = $1
              WHERE ${wheres.join(' AND ')}
              ORDER BY d.updated_at DESC, d.id DESC
              LIMIT $${idx}
@@ -153,6 +183,29 @@ export class DocumentRepository {
     async findRaw(id: string, tx?: DbClient) {
         const client = tx ?? this.prisma;
         return client.document.findUnique({ where: { id } });
+    }
+
+    /**
+     * 只刷新「当前快照」和统计，**不新增版本**（自动归档用）。
+     *
+     * 刻意不动 content_hash 和 snapshot_version：
+     *   - content_hash 是「最近一次存档」的内容基线，手动保存靠它判断要不要新建版本
+     *   - snapshot_version 是最近一次真正归档的版本号
+     */
+    async refreshSnapshot(args: {
+        documentId: string;
+        snapshot: Buffer;
+        sizeBytes: number;
+        cellCount: number;
+    }): Promise<void> {
+        await this.prisma.$executeRaw`
+            UPDATE documents
+               SET snapshot   = ${args.snapshot},
+                   doc_size   = ${args.sizeBytes},
+                   cell_count = ${args.cellCount},
+                   updated_at = now()
+             WHERE id = ${args.documentId}
+        `;
     }
 
     // ─────────────────────── 版本 / 归档 ───────────────────────
@@ -234,5 +287,128 @@ export class DocumentRepository {
             await tx.documentMember.deleteMany({ where: { documentId } });
             await tx.document.delete({ where: { id: documentId } });
         });
+    }
+
+    // ─────────────────────── 成员 ───────────────────────
+
+    /** 查用户基本信息（邮箱/用户名），通知 body 与成员列表用 */
+    async findUser(
+        userId: string
+    ): Promise<{
+        id: string;
+        email: string;
+        username: string;
+        displayName: string | null;
+    } | null> {
+        return this.prisma.user.findUnique({
+            where: { id: userId },
+            select: { id: true, email: true, username: true, displayName: true },
+        });
+    }
+
+    /** 查某人对某文档的成员记录（不含 owner，owner 走 documents.owner_id） */
+    async findMember(
+        documentId: string,
+        userId: string
+    ): Promise<{ role: string } | null> {
+        return this.prisma.documentMember.findUnique({
+            where: { documentId_userId: { documentId, userId } },
+            select: { role: true },
+        });
+    }
+
+    /** 成员列表（join 用户信息，给右上角协作者面板用） */
+    async listMembers(documentId: string): Promise<MemberRow[]> {
+        const rows = await this.prisma.documentMember.findMany({
+            where: { documentId },
+            include: {
+                user: { select: { email: true, username: true, displayName: true } },
+            },
+            orderBy: { createdAt: 'asc' },
+        });
+        return rows.map((r) => ({
+            user_id: r.userId,
+            role: r.role,
+            email: r.user.email,
+            username: r.user.username,
+            display_name: r.user.displayName,
+            joined_at: r.createdAt,
+        }));
+    }
+
+    /** 写入/更新成员角色。审批通过时可能已有记录，用 upsert 兜底 */
+    async upsertMember(
+        documentId: string,
+        userId: string,
+        role: 'EDITOR' | 'VIEWER'
+    ): Promise<void> {
+        await this.prisma.documentMember.upsert({
+            where: { documentId_userId: { documentId, userId } },
+            create: { documentId, userId, role: role as MemberRole },
+            update: { role: role as MemberRole },
+        });
+    }
+
+    async removeMember(documentId: string, userId: string): Promise<void> {
+        await this.prisma.documentMember.delete({
+            where: { documentId_userId: { documentId, userId } },
+        });
+    }
+
+    // ─────────────────────── 访问申请 ───────────────────────
+
+    async findPendingRequest(documentId: string, requesterId: string) {
+        return this.prisma.documentAccessRequest.findFirst({
+            where: { documentId, requesterId, status: 'PENDING' },
+        });
+    }
+
+    async createAccessRequest(documentId: string, requesterId: string) {
+        return this.prisma.documentAccessRequest.create({
+            data: { documentId, requesterId, status: AccessRequestStatus.PENDING },
+        });
+    }
+
+    async findAccessRequest(id: string) {
+        return this.prisma.documentAccessRequest.findUnique({ where: { id } });
+    }
+
+    async decideAccessRequest(
+        id: string,
+        status: 'APPROVED' | 'REJECTED',
+        decidedBy: string,
+        decidedRole: 'EDITOR' | 'VIEWER' | null
+    ): Promise<void> {
+        await this.prisma.documentAccessRequest.update({
+            where: { id },
+            data: {
+                status: status as AccessRequestStatus,
+                decidedBy,
+                decidedRole: decidedRole as MemberRole | null,
+                decidedAt: new Date(),
+            },
+        });
+    }
+
+    async listAccessRequests(documentId: string): Promise<AccessRequestRow[]> {
+        const rows = await this.prisma.documentAccessRequest.findMany({
+            where: { documentId },
+            include: {
+                requester: { select: { email: true, username: true, displayName: true } },
+            },
+            orderBy: { createdAt: 'desc' },
+        });
+        return rows.map((r) => ({
+            id: r.id,
+            document_id: r.documentId,
+            requester_id: r.requesterId,
+            status: r.status,
+            decided_role: r.decidedRole,
+            created_at: r.createdAt,
+            decided_at: r.decidedAt,
+            requester_email: r.requester.email,
+            requester_username: r.requester.username,
+            requester_display_name: r.requester.displayName,
+        }));
     }
 }

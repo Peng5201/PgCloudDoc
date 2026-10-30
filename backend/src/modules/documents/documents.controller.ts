@@ -24,11 +24,14 @@ import {
 import type { Response } from 'express';
 import { DocumentService } from './document.service';
 import {
+    AccessRequestDto,
+    ApproveAccessRequestDto,
     CreateDocumentDto,
     DocumentDetail,
     DocumentSummary,
     DocumentVersionDto,
     ListDocumentsDto,
+    MemberDto,
     UpdateDocumentDto,
 } from './dto/document.dto';
 import { CurrentUser, type AuthUser } from '../../common/decorators/auth.decorators';
@@ -125,11 +128,12 @@ export class DocumentsController {
 
     @Post(':id/archive')
     @HttpCode(200)
-    archive(
+    async archive(
         @CurrentUser() user: AuthUser,
         @Param('id') id: string,
         @Body() body: { remark?: string }
-    ): Promise<{ versionNo: number }> {
+    ): Promise<{ versionNo: number; created: boolean }> {
+        await this.documents.getAccessibleRow(user.id, id, 'write');
         return this.documents.archive(id, user.id, body?.remark);
     }
 
@@ -162,8 +166,77 @@ export class DocumentsController {
         @Param('id') id: string,
         @Query('reason', new DefaultValuePipe('manual')) reason: string
     ): Promise<{ accepted: true }> {
-        await this.documents.getAccessibleRow(user.id, id);
+        await this.documents.getAccessibleRow(user.id, id, 'write');
         await this.documents.requestArchive(id, user.id, reason);
         return { accepted: true };
+    }
+
+    // ─────────────────────── 权限协作 ───────────────────────
+
+    @Get(':id/members')
+    members(
+        @CurrentUser() user: AuthUser,
+        @Param('id') id: string
+    ): Promise<MemberDto[]> {
+        return this.documents.listMembers(user.id, id);
+    }
+
+    @Patch(':id/members/:userId')
+    @HttpCode(200)
+    updateMemberRole(
+        @CurrentUser() user: AuthUser,
+        @Param('id') id: string,
+        @Param('userId') targetUserId: string,
+        @Body() body: ApproveAccessRequestDto
+    ): Promise<void> {
+        return this.documents.updateMemberRole(user.id, id, targetUserId, body.role);
+    }
+
+    @Delete(':id/members/:userId')
+    @HttpCode(200)
+    removeMember(
+        @CurrentUser() user: AuthUser,
+        @Param('id') id: string,
+        @Param('userId') targetUserId: string
+    ): Promise<void> {
+        return this.documents.removeMember(user.id, id, targetUserId);
+    }
+
+    @Post(':id/access-requests')
+    @HttpCode(201)
+    requestAccess(
+        @CurrentUser() user: AuthUser,
+        @Param('id') id: string
+    ): Promise<void> {
+        return this.documents.requestAccess(user.id, id);
+    }
+
+    @Get(':id/access-requests')
+    accessRequests(
+        @CurrentUser() user: AuthUser,
+        @Param('id') id: string
+    ): Promise<AccessRequestDto[]> {
+        return this.documents.listAccessRequests(user.id, id);
+    }
+
+    @Post(':id/access-requests/:requestId/approve')
+    @HttpCode(200)
+    approveAccessRequest(
+        @CurrentUser() user: AuthUser,
+        @Param('id') id: string,
+        @Param('requestId') requestId: string,
+        @Body() body: ApproveAccessRequestDto
+    ): Promise<void> {
+        return this.documents.approveAccessRequest(user.id, id, requestId, body.role);
+    }
+
+    @Post(':id/access-requests/:requestId/reject')
+    @HttpCode(200)
+    rejectAccessRequest(
+        @CurrentUser() user: AuthUser,
+        @Param('id') id: string,
+        @Param('requestId') requestId: string
+    ): Promise<void> {
+        return this.documents.rejectAccessRequest(user.id, id, requestId);
     }
 }

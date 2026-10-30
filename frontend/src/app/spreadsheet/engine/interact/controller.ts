@@ -91,6 +91,8 @@ interface IDragState {
 export class Controller {
     selection: ISelection = singleSelection(0, 0);
 
+    private _readOnly = false;
+
     private readonly _editor: CellEditor;
     private readonly _clipboard = new InternalClipboard();
     private _disposables: Array<() => void> = [];
@@ -159,9 +161,19 @@ export class Controller {
         this.setSelection(singleSelection(row, column));
     }
 
+    /** 只读模式：允许浏览/选中/复制，禁止一切写操作 */
+    setReadOnly(readonly: boolean): void {
+        this._readOnly = readonly;
+        if (readonly && this._editor.isOpen) {
+            this._editor.close();
+            this._hooks.editChange(false);
+        }
+    }
+
     // ─────────────────────────── 编辑 ───────────────────────────
 
     beginEdit(row: number, column: number, initialValue?: string, selectAll = true): void {
+        if (this._readOnly) return;
         this.setActiveCell(row, column);
         this._editor.open(row, column, initialValue, selectAll);
         this._hooks.editChange(true);
@@ -205,6 +217,7 @@ export class Controller {
 
     /** 清空当前选区（Delete / Backspace / 清除内容按钮） */
     clearSelection(): void {
+        if (this._readOnly) return;
         for (const range of this.selection.ranges) {
             this._history.push(createClearRangeEdit(this._worksheet, range));
         }
@@ -289,7 +302,7 @@ export class Controller {
         event.clipboardData?.setData('text/html', payload.html);
         this._clipboard.set(payload);
 
-        if (cut) {
+        if (cut && !this._readOnly) {
             this._history.push(createCutEdit(this._worksheet, range));
             this._hooks.contentChange();
         }
@@ -297,9 +310,10 @@ export class Controller {
 
     /** paste 事件里调 */
     readClipboard(event: ClipboardEvent): void {
-        const text = event.clipboardData?.getData('text/plain') ?? '';
         event.preventDefault();
+        if (this._readOnly) return;
 
+        const text = event.clipboardData?.getData('text/plain') ?? '';
         const payload: IClipboardPayload | null = this._clipboard.matches(text)
             ? this._clipboard.payload
             : null;
@@ -309,6 +323,7 @@ export class Controller {
 
     /** 也允许外部直接贴一坨文本（公式栏/右键菜单将来要用） */
     pasteText(text: string): void {
+        if (this._readOnly) return;
         this.pasteMatrix(matrixFromText(text));
     }
 
@@ -560,6 +575,18 @@ export class Controller {
     private _handleShortcut(event: KeyboardEvent): boolean {
         const mod = event.ctrlKey || event.metaKey;
         const key = event.key.toLowerCase();
+
+        // 只读时编辑类快捷键直接吞掉；Ctrl+A 全选 / 方向键导航仍允许
+        if (this._readOnly) {
+            const editingWithMod =
+                mod && (key === 'z' || key === 'y' || key === 'b' || key === 'i' || key === 'u');
+            const editingPlain =
+                event.key === 'F2' || event.key === 'Delete' || event.key === 'Backspace';
+            if (editingWithMod || editingPlain) {
+                event.preventDefault();
+                return true;
+            }
+        }
 
         // Ctrl/⌘ 组合
         if (mod) {

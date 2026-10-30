@@ -195,7 +195,7 @@ export class SheetSkeleton {
      * IColorStyle → CSS 颜色串。
      *
      * 样式里存的是 univer 的 `{ rgb: '#RRGGBB' }` 形状，画布只吃 CSS 颜色。
-     * 这是模型层唯一的「形状转换」出口，保证 toJSON 往返不受渲染影响。
+     * 这是数据层唯一的「形状转换」出口，保证 toJSON 往返不受渲染影响。
      */
     resolveColor(color?: IColorStyle | null, fallback = ''): string {
         if (!color) return fallback;

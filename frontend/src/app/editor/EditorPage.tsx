@@ -3,19 +3,15 @@
  *
  * ## 启动顺序（重要）
  *
- *   1. 连协同 WS，等首次同步（3s 超时）
- *   2. 从 **Y.Doc** 物化出快照喂给引擎 —— Y.Doc 是协同真源
- *   3. WS 拿不到数据才降级去 `GET /snapshot`
- *
- * 第 2 步不能反过来（先拉快照再合并进 Y.Doc）：快照可能比 Y.Doc 旧，
- * 那等于用一份过期数据去污染 CRDT，合并语义就不成立了。
+ * 收敛在 `useDocSync().load()` 一个方法里：
+ *   建连 → 获取数据 → 序列化为本地对象 → 交给渲染。
+ * 细节（Y.Doc 是协同真源、WS 拿不到数据才降级 `GET /snapshot`）见 `useDocSync.ts`。
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
     App,
-    Avatar,
     Badge,
     Button,
     Drawer,
@@ -23,6 +19,7 @@ import {
     Input,
     List,
     Popconfirm,
+    Result,
     Space,
     Spin,
     Tag,
@@ -32,27 +29,34 @@ import {
 import {
     CloudServerOutlined,
     DownloadOutlined,
+    FrownOutlined,
     HistoryOutlined,
     LoadingOutlined,
+    ReloadOutlined,
     SaveOutlined,
     WifiOutlined,
 } from '@ant-design/icons';
 import { AppLayout } from '../../shared/AppLayout';
 import { SheetView } from '../spreadsheet/SheetView';
-import type { IWorkbookData, SheetEngine } from '../spreadsheet/engine';
+import type { IRemoteSelection, ISelection, IWorkbookData, SheetEngine } from '../spreadsheet/engine';
 import { useDocSync } from '../collab/useDocSync';
-import { documentsApi, type DocumentVersion } from '../api/documents';
+import type { Peer } from '../collab/doc-sync';
+import { documentsApi, type DocumentVersion, type Member } from '../api/documents';
 import { ApiError } from '../api/client';
+import { useAuth } from '../auth/AuthContext';
+import { AccessRequestPanel } from './AccessRequestPanel';
+import { CollaboratorsPopover } from './CollaboratorsPopover';
+import { fingerprintWorkbook } from './workbook-fingerprint';
 
 const { Text } = Typography;
 
 export function EditorPage() {
     const { id = '' } = useParams();
     const navigate = useNavigate();
-    const { message: messageApi, modal } = App.useApp();
+    const { message: messageApi } = App.useApp();
+    const { user } = useAuth();
 
     const [snapshot, setSnapshot] = useState<IWorkbookData | null>(null);
-    const [source, setSource] = useState<'collab' | 'snapshot'>('collab');
     const [loading, setLoading] = useState(true);
     const [loadError, setLoadError] = useState<string | null>(null);
     const [docName, setDocName] = useState('');
@@ -63,19 +67,52 @@ export function EditorPage() {
     const [versionsLoading, setVersionsLoading] = useState(false);
     /** 远端改了文档结构（增删 sheet），要整体重建引擎 */
     const [structureVersion, setStructureVersion] = useState(0);
+    /** 文档名点开编辑态 */
+    const [renaming, setRenaming] = useState(false);
+    const [nameDraft, setNameDraft] = useState('');
+    const renamingRef = useRef(false);
+    /** 无权限访问（404/403）时显示申请页 */
+    const [accessDenied, setAccessDenied] = useState(false);
+    /** 当前用户在该文档的角色，判断只读/编辑 */
+    const [myRole, setMyRole] = useState<Member['role'] | null>(null);
+    /** 递增即触发一次重新加载（失败页的「重新加载」按钮） */
+    const [reloadToken, setReloadToken] = useState(0);
 
     const engineRef = useRef<SheetEngine | null>(null);
-    const docSyncRef = useRef<{ materialize(): IWorkbookData; setName(n: string): void } | null>(
-        null
-    );
+    /** 上次存档（或刚载入）时的内容指纹，null = 还没建立基线 */
+    const savedFingerprintRef = useRef<string | null>(null);
+    const docSyncRef = useRef<{
+        materialize(): IWorkbookData;
+        setName(n: string): void;
+        setLocalSelection(selection: ISelection): void;
+    } | null>(null);
+    /** 最新的 peers，供引擎重建时立刻补画远端选区 */
+    const peersRef = useRef<Peer[]>([]);
 
     const onStructureChange = useCallback(() => {
         setStructureVersion((v) => v + 1);
     }, []);
 
-    const { docSync, status, notice, peers, waitUntilReady, attach } = useDocSync(id, {
+    const { docSync, status, notice, peers, load, attach, reconnect } = useDocSync(id, {
         onStructureChange,
     });
+
+    peersRef.current = peers;
+
+    /** 别人的选区变化 → 直接灌进渲染层（不经过 React 树，只触发一次重绘） */
+    useEffect(() => {
+        engineRef.current?.setRemoteSelections(toRemoteSelections(peers));
+    }, [peers]);
+
+    /** 重新加载：先强制重连（普通 connect 对卡死的连接是幂等的），再触发载入流程 */
+    const retryLoad = useCallback(() => {
+        try {
+            reconnect();
+        } catch (err) {
+            console.warn('[editor] 重连失败', err);
+        }
+        setReloadToken((t) => t + 1);
+    }, [reconnect]);
 
     // ────────────────────────── 载入 ──────────────────────────
 
@@ -85,30 +122,33 @@ export function EditorPage() {
 
         (async () => {
             setLoading(true);
-            setLoadError(null);
+            setAccessDenied(false);
+            // 注意：这里**不清 loadError**。重试时保留错误页，按钮上转圈，
+            // 失败得快也能看到反馈；成功后再清掉。
             try {
-                const viaSync = await waitUntilReady();
+                // 建连 → 获取数据 → 序列化 → 交给渲染。
+                // 加超时：fetch 本身没有超时，后端不响应时页面会永远停在载入中
+                const loaded = await withTimeout(load(), LOAD_TIMEOUT_MS);
                 if (cancelled) return;
 
-                if (viaSync) {
-                    setSnapshot(docSync.materialize());
-                    setDocName(docSync.getName());
-                    setSource('collab');
-                } else {
-                    // 降级：协同通道不可用，至少让文档能打开（只读式编辑，改动不共享）
-                    const [detail, snap] = await Promise.all([
-                        documentsApi.detail(id),
-                        documentsApi.snapshot(id),
-                    ]);
-                    if (cancelled) return;
-                    setSnapshot(snap);
-                    setDocName(detail.name);
-                    setSource('snapshot');
+                setSnapshot(loaded.snapshot);
+                setDocName(loaded.docName);
+                setLoadError(null);
+
+                if (loaded.source === 'snapshot') {
                     messageApi.warning('协同服务未连接，当前为离线模式，改动不会实时同步');
                 }
             } catch (err) {
                 if (cancelled) return;
-                setLoadError(err instanceof ApiError ? err.message : '文档加载失败');
+                // 具体原因先打到控制台，方便排查（页面只给用户看必要的）
+                console.error('[editor] 文档加载失败', err);
+                // 404（无权限或不存在，后端统一 404 防枚举）/ 403（权限不足）→ 走申请页
+                if (err instanceof ApiError && (err.status === 404 || err.status === 403)) {
+                    setAccessDenied(true);
+                } else {
+                    // 保留原始错误信息（`取快照失败（500）` 这类才查得到问题）
+                    setLoadError(err instanceof Error ? err.message : '文档加载失败');
+                }
             } finally {
                 if (!cancelled) setLoading(false);
             }
@@ -117,13 +157,29 @@ export function EditorPage() {
         return () => {
             cancelled = true;
         };
-    }, [docSync, id, waitUntilReady, messageApi]);
+    }, [docSync, load, messageApi, reloadToken]);
 
     // 结构性改动（远端增删 sheet）→ 重新物化一份快照，SheetView 会重建引擎
     useEffect(() => {
         if (structureVersion === 0 || !docSync || loading) return;
         setSnapshot(docSync.materialize());
     }, [structureVersion, docSync, loading]);
+
+    // 拉成员列表，确定自己的角色（只读 / 编辑 / 创建者）
+    const loadMyRole = useCallback(async () => {
+        try {
+            const members = await documentsApi.members(id);
+            const me = members.find((m) => m.userId === user?.id);
+            setMyRole(me?.role ?? null);
+        } catch {
+            setMyRole(null);
+        }
+    }, [id, user?.id]);
+
+    useEffect(() => {
+        if (!docSync || accessDenied || loading || !user) return;
+        void loadMyRole();
+    }, [docSync, accessDenied, loading, user, loadMyRole]);
 
     useEffect(() => {
         docSyncRef.current = docSync;
@@ -153,21 +209,37 @@ export function EditorPage() {
 
     // ────────────────────────── 操作 ──────────────────────────
 
+    const isReadonly = myRole === 'VIEWER';
+    const canEdit = myRole === 'OWNER' || myRole === 'EDITOR';
+
     const handleEngineReady = useCallback(
         (engine: SheetEngine | null) => {
             engineRef.current = engine;
+            // 协同桥无条件挂上：只读是引擎自己拦的（readOnly），不靠这里判断。
+            // 曾经按 canEdit 决定挂不挂，但角色是异步拉的 —— 引擎就绪时 myRole 还是
+            // null（canEdit=false），桥没挂上；角色回来后又不会再触发 onEngineReady，
+            // 结果本地编辑根本进不了 Y.Doc，刷新即丢。
             attach(engine);
             if (engine) {
+                // 引擎首次就绪时记下内容指纹：之后「要不要保存」都拿它比
+                if (savedFingerprintRef.current === null) {
+                    void fingerprintWorkbook(engine.toJSON()).then((fp) => {
+                        // 期间如果已经存过一版，别用更早的基线覆盖
+                        if (savedFingerprintRef.current === null) {
+                            savedFingerprintRef.current = fp;
+                        }
+                    });
+                }
                 // 任何本地改动都标记「有未存档的版本」
                 const off = engine.on('content-change', () => setDirty(true));
                 engine.on('selection-change', () => {
-                    const selection = engine.getSelection();
-                    docSyncRef.current &&
-                        (docSync as { setLocalCell?(r: number, c: number): void })?.setLocalCell?.(
-                            selection.active.row,
-                            selection.active.column
-                        );
+                    // 把完整选区（多块 + 活动格）广播出去，别人才能看到我在选哪片
+                    docSyncRef.current?.setLocalSelection(engine.getSelection());
                 });
+                // 引擎就绪时先把当前已有的远端选区灌进去
+                engine.setRemoteSelections(toRemoteSelections(peersRef.current));
+                // 顺手把自己的初始选区广播出去（不然别人要等我点一下才看得到）
+                docSyncRef.current?.setLocalSelection(engine.getSelection());
                 return () => {
                     off();
                 };
@@ -178,11 +250,35 @@ export function EditorPage() {
     );
 
     async function handleSave() {
+        if (saving) return;
+        // 快速判断：载入后什么都没发生过
+        if (!dirty) {
+            messageApi.info('没有改动，不用保存');
+            return;
+        }
+
         setSaving(true);
         try {
-            const { versionNo } = await documentsApi.archive(id, '手动保存');
+            // dirty 只能说明「有事件发生过」——改了又改回去的内容其实没变，
+            // 用内容指纹再确认一次（改回原样就不必再存一个空版本）
+            const engine = engineRef.current;
+            const current = engine ? await fingerprintWorkbook(engine.toJSON()) : null;
+            if (current !== null && current === savedFingerprintRef.current) {
+                // 内容确实和存档一致，把「有未存档的改动」标记也清掉
+                setDirty(false);
+                messageApi.info('没有改动，不用保存');
+                return;
+            }
+
+            const result = await documentsApi.archive(id, '手动保存');
+            if (current !== null) savedFingerprintRef.current = current;
             setDirty(false);
-            messageApi.success(`已保存为版本 ${versionNo}`);
+            if (result.created) {
+                messageApi.success(`已保存为版本 ${result.versionNo}`);
+            } else {
+                // 服务端按内容哈希判定内容没变，没有新增版本
+                messageApi.info('没有改动，不用保存');
+            }
             if (versionsOpen) void loadVersions();
         } catch (err) {
             messageApi.error(err instanceof ApiError ? err.message : '保存失败');
@@ -190,6 +286,26 @@ export function EditorPage() {
             setSaving(false);
         }
     }
+
+    // Ctrl/⌘ + S 保存。必须 preventDefault，否则浏览器会同时弹出「保存网页」对话框
+    const saveShortcutRef = useRef<() => void>(() => undefined);
+    useEffect(() => {
+        saveShortcutRef.current = () => {
+            if (loading || accessDenied || !canEdit) return;
+            void handleSave();
+        };
+    });
+
+    useEffect(() => {
+        const onKeyDown = (e: KeyboardEvent) => {
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+                e.preventDefault();
+                saveShortcutRef.current();
+            }
+        };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, []);
 
     async function loadVersions() {
         setVersionsLoading(true);
@@ -216,6 +332,8 @@ export function EditorPage() {
             if (docSync) {
                 setSnapshot(docSync.materialize());
             }
+            // 回滚本身已经归档了一版，基线交给重建后的引擎重新建立
+            savedFingerprintRef.current = null;
             setDirty(false);
         } catch (err) {
             messageApi.error(err instanceof ApiError ? err.message : '回滚失败');
@@ -235,50 +353,45 @@ export function EditorPage() {
         URL.revokeObjectURL(url);
     }
 
-    function handleRename() {
-        let value = docName;
-        modal.confirm({
-            title: '重命名文档',
-            content: (
-                <Input
-                    defaultValue={docName}
-                    maxLength={128}
-                    onChange={(e) => {
-                        value = e.target.value;
-                    }}
-                />
-            ),
-            onOk: async () => {
-                const next = value.trim();
-                if (!next || next === docName) return;
-                setDocName(next);
-                // 协作者实时看到 + 落库（列表页也跟着变）
-                docSyncRef.current?.setName(next);
-                await documentsApi.update(id, { name: next });
-                messageApi.success('已重命名');
-            },
-        });
+    // ────────────────────────── 文档名（点击即编辑）──────────────────────────
+
+    function startRename() {
+        // 载入中还没有名字，点开只会是个空输入框
+        if (isReadonly || loading) return;
+        setNameDraft(docName);
+        renamingRef.current = true;
+        setRenaming(true);
+    }
+
+    /** 失焦 / 回车提交；Esc 或校验失败则放弃 */
+    async function commitRename() {
+        // 回车先触发、随后失焦还会再来一次，用 ref 挡掉重复提交
+        if (!renamingRef.current) return;
+        renamingRef.current = false;
+        setRenaming(false);
+
+        const next = nameDraft.trim();
+        if (!next) {
+            messageApi.error('文档名不能为空');
+            return;
+        }
+        if (next === docName) return;
+
+        const previous = docName;
+        setDocName(next);
+        // 协作者实时看到 + 落库（列表页也跟着变）
+        docSyncRef.current?.setName(next);
+        try {
+            await documentsApi.update(id, { name: next });
+        } catch (err) {
+            // 写库失败就把本地和协同层都退回去，别让界面显示一个没存上的名字
+            setDocName(previous);
+            docSyncRef.current?.setName(previous);
+            messageApi.error(err instanceof ApiError ? err.message : '重命名失败');
+        }
     }
 
     // ────────────────────────── 渲染 ──────────────────────────
-
-    const peersContent = useMemo(() => {
-        if (peers.length === 0) return null;
-        return (
-            <Avatar.Group maxCount={5} size="small">
-                {peers.map((peer) => (
-                    <Tooltip
-                        key={peer.clientId}
-                        title={`${peer.displayName}${peer.cell ? ` · ${cellRef(peer.cell)}` : ''}`}
-                    >
-                        <Avatar size="small" style={{ background: peer.color }}>
-                            {peer.displayName.slice(0, 1)}
-                        </Avatar>
-                    </Tooltip>
-                ))}
-            </Avatar.Group>
-        );
-    }, [peers]);
 
     const statusIcon =
         status === 'connected' ? (
@@ -291,7 +404,11 @@ export function EditorPage() {
 
     const extra = (
         <Space size={8}>
-            {peersContent}
+            <CollaboratorsPopover
+                documentId={id}
+                myRole={myRole}
+                onChanged={() => void loadMyRole()}
+            />
             <Tooltip
                 title={
                     status === 'connected'
@@ -307,10 +424,18 @@ export function EditorPage() {
             <Dropdown
                 menu={{
                     items: [
+                        {
+                            key: 'save',
+                            label: saving ? '正在保存…' : '保存为版本',
+                            icon: <SaveOutlined />,
+                            disabled: isReadonly || saving,
+                        },
+                        { type: 'divider' },
                         { key: 'versions', label: '版本历史', icon: <HistoryOutlined /> },
                         { key: 'export', label: '导出 JSON', icon: <DownloadOutlined /> },
                     ],
                     onClick: ({ key }) => {
+                        if (key === 'save') void handleSave();
                         if (key === 'versions') openVersions();
                         if (key === 'export') handleExport();
                     },
@@ -318,15 +443,6 @@ export function EditorPage() {
             >
                 <Button type="text" style={{ color: '#fff' }} icon={<HistoryOutlined />} />
             </Dropdown>
-
-            <Button
-                type="primary"
-                icon={<SaveOutlined />}
-                loading={saving}
-                onClick={() => void handleSave()}
-            >
-                保存
-            </Button>
         </Space>
     );
 
@@ -338,37 +454,113 @@ export function EditorPage() {
                         <a onClick={() => navigate('/')} style={styles.back}>
                             ← 文档列表
                         </a>
-                        <Text strong style={{ fontSize: 15 }}>
-                            {docName || '未命名文档'}
-                        </Text>
-                        <Button type="link" size="small" onClick={handleRename}>
-                            重命名
-                        </Button>
+                        {renaming ? (
+                            <Input
+                                size="small"
+                                autoFocus
+                                value={nameDraft}
+                                maxLength={128}
+                                style={{ width: 220 }}
+                                onChange={(e) => setNameDraft(e.target.value)}
+                                onPressEnter={() => void commitRename()}
+                                onBlur={() => void commitRename()}
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Escape') {
+                                        // 放弃修改：先关掉标记，onBlur 就不会再提交
+                                        renamingRef.current = false;
+                                        setRenaming(false);
+                                    }
+                                }}
+                            />
+                        ) : (
+                            !loading && (
+                                <Tooltip title={isReadonly ? '只读，无法重命名' : '点击重命名'}>
+                                    <Text
+                                        strong
+                                        style={{
+                                            fontSize: 15,
+                                            cursor: isReadonly ? 'default' : 'text',
+                                        }}
+                                        onClick={startRename}
+                                    >
+                                        {docName || '未命名文档'}
+                                    </Text>
+                                </Tooltip>
+                            )
+                        )}
                     </Space>
                     <Space size={8}>
-                        {dirty && <Tag color="orange">有未存档的改动</Tag>}
-                        <Tag>{source === 'collab' ? '实时协同' : '离线模式'}</Tag>
+                        {/* 载入中角色还没确定，先留空 */}
+                        {!loading && (
+                            <>
+                                {myRole === 'OWNER' && <Tag color="gold">创建者</Tag>}
+                                <Tag color={canEdit ? 'green' : 'orange'}>
+                                    {isReadonly ? '只读' : '可编辑'}
+                                </Tag>
+                            </>
+                        )}
                     </Space>
                 </div>
 
                 <div style={styles.sheetArea}>
-                    {loading && (
+                    {loading && !accessDenied && !loadError && (
                         <div style={styles.center}>
                             <Spin size="large" tip="正在载入文档…" />
                         </div>
                     )}
-                    {!loading && loadError && (
+                    {!loading && accessDenied && (
                         <div style={styles.center}>
-                            <Space direction="vertical">
-                                <Text type="danger">{loadError}</Text>
-                                <Button onClick={() => navigate('/')}>返回文档列表</Button>
-                            </Space>
+                            <AccessRequestPanel documentId={id} />
                         </div>
                     )}
-                    {!loading && !loadError && snapshot && (
+                    {!accessDenied && loadError && (
+                        <div style={styles.center}>
+                            <Result
+                                icon={<FrownOutlined style={{ color: '#faad14' }} />}
+                                title="文档暂时打不开"
+                                subTitle={loadError}
+                                extra={
+                                    <Space size={8}>
+                                        <Button
+                                            type="primary"
+                                            // 不用 loading 属性：antd 在 loading 时会吞掉点击，
+                                            // 万一卡在加载中就没法重试了
+                                            icon={loading ? <LoadingOutlined /> : <ReloadOutlined />}
+                                            onClick={retryLoad}
+                                        >
+                                            重新加载
+                                        </Button>
+                                        <Button onClick={() => navigate('/')}>
+                                            返回文档列表
+                                        </Button>
+                                    </Space>
+                                }
+                            />
+                        </div>
+                    )}
+                    {!loading && !accessDenied && !loadError && !snapshot && (
+                        <div style={styles.center}>
+                            <Result
+                                icon={<FrownOutlined style={{ color: '#faad14' }} />}
+                                title="文档还没有准备好"
+                                subTitle="协同实例或登录态可能尚未就绪"
+                                extra={
+                                    <Button
+                                        type="primary"
+                                        icon={<ReloadOutlined />}
+                                        onClick={retryLoad}
+                                    >
+                                        重新加载
+                                    </Button>
+                                }
+                            />
+                        </div>
+                    )}
+                    {!loading && !accessDenied && !loadError && snapshot && (
                         <SheetView
                             key={structureVersion}
                             snapshot={snapshot}
+                            readOnly={isReadonly}
                             onEngineReady={handleEngineReady}
                         />
                     )}
@@ -394,8 +586,11 @@ export function EditorPage() {
                                     onConfirm={() => void handleRestore(version.versionNo)}
                                     okText="回滚"
                                     cancelText="取消"
+                                    disabled={isReadonly}
                                 >
-                                    <Button size="small">回滚</Button>
+                                    <Button size="small" disabled={isReadonly}>
+                                        回滚
+                                    </Button>
                                 </Popconfirm>,
                             ]}
                         >
@@ -421,18 +616,38 @@ export function EditorPage() {
     );
 }
 
-function cellRef(cell: { row: number; column: number }): string {
-    return `${columnLabel(cell.column)}${cell.row + 1}`;
+/** Peer[] → 渲染层要的远端选区结构 */
+function toRemoteSelections(peers: Peer[]): IRemoteSelection[] {
+    return peers
+        .filter((peer) => peer.selection && peer.selection.ranges.length > 0)
+        .map((peer) => ({
+            key: peer.clientId,
+            name: peer.displayName,
+            color: peer.color,
+            ranges: peer.selection!.ranges,
+            active: peer.selection!.active,
+        }));
 }
 
-function columnLabel(index: number): string {
-    let label = '';
-    let n = index;
-    while (n >= 0) {
-        label = String.fromCharCode(65 + (n % 26)) + label;
-        n = Math.floor(n / 26) - 1;
-    }
-    return label;
+/** 整个载入流程的上限。fetch 没有内置超时，后端不响应时必须由这里兜底 */
+const LOAD_TIMEOUT_MS = 20_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+        const timer = setTimeout(() => {
+            reject(new Error('加载超时，请检查网络或后端服务是否正常'));
+        }, ms);
+        promise.then(
+            (value) => {
+                clearTimeout(timer);
+                resolve(value);
+            },
+            (err: unknown) => {
+                clearTimeout(timer);
+                reject(err);
+            }
+        );
+    });
 }
 
 function formatBytes(bytes: number): string {

@@ -24,7 +24,17 @@ PgCloudDoc 是一个**实时协同电子表格**：多个用户可以在浏览�
 
 ---
 
-## 2. 快速使用
+## 2. 环境要求
+
+| 依赖 | 版本 | 说明 |
+| --- | --- | --- |
+| Node.js | **22+** | Nest 12 是纯 ESM 包，依赖 Node 的 `require(esm)` |
+| pnpm | **12+** | monorepo 用 pnpm workspace 组织 |
+| Docker | 含 Compose | PostgreSQL / Redis / Kafka 全在容器里，本地不用单独装 |
+
+---
+
+## 3. 快速使用
 
 只想最快跑起来，一条命令即可：
 
@@ -36,21 +46,55 @@ pnpm deploy:prod
 
 > 前提：装好 Docker（含 Compose）。首次运行会生成 `deploy/.env.production`（随机密钥，权限 600）。
 
-要**改代码调试**（前端/后端热更新），走本地开发路径，见下方「3.2 本地开发启动」。
+要**改代码调试**（前端/后端热更新），走本地开发路径，见下方「5.1 本地开发启动」。
 
 ---
 
-## 3. 部署启动方法
+## 4. 目录结构介绍
 
-### 3.1 环境要求
+```text
+PgCloudDoc/
+├── backend/          NestJS 服务端
+│   ├── prisma/       数据模型 + 迁移（含存储过程、视图）
+│   ├── src/
+│   │   ├── config/       环境变量 zod 校验 + 分层配置
+│   │   ├── common/       横切：中间件 / 异常过滤器 / 拦截器 / Guard / 装饰器 / 错误码
+│   │   ├── component/    工作表数据定义（IWorkbookData 示例，旧 /api/testSheet 用）
+│   │   ├── infra/        prisma · redis · kafka · yjs
+│   │   └── modules/      auth · users · documents · collab · jobs · health
+│   ├── kafka/        Kafka 单节点配置（开发用）
+│   ├── Dockerfile    多阶段构建：deps → build → prod-deps → migrator → runtime
+│   ├── test/         集成冒烟脚本
+│   └── README.md     后端架构、接口文档、设计决策
+│
+├── frontend/         React + Vite 前端
+│   ├── src/
+│   │   ├── app/api/          HTTP 客户端 + 接口封装
+│   │   ├── app/auth/         登录态、登录/注册页
+│   │   ├── app/documents/    文档列表
+│   │   ├── app/editor/       编辑器页
+│   │   ├── app/collab/       CRDT 协同（Y.Doc ↔ 引擎双向桥）
+│   │   ├── app/spreadsheet/  自研表格引擎（canvas 渲染 + 撤销重做）
+│   │   └── shared/           共享组件（如应用外壳 AppLayout）
+│   ├── Dockerfile    nginx + 静态产物
+│   └── test/         单测 + 集成冒烟
+│
+├── deploy/           生产部署
+│   ├── deploy.mjs             一键部署脚本
+│   ├── docker-compose.prod.yml
+│   ├── nginx.conf             静态托管 + /api、/collab 反向代理
+│   ├── nginx-proxy-headers.inc 反代公共头（include 片段）
+│   ├── kafka/server.properties 双 listener 配置
+│   └── .env.production.example 变量模板（真实值部署时生成）
+│
+└── package.json      pnpm workspace 根
+```
 
-| 依赖 | 版本 | 说明 |
-| --- | --- | --- |
-| Node.js | **22+** | Nest 12 是纯 ESM 包，依赖 Node 的 `require(esm)` |
-| pnpm | **12+** | monorepo 用 pnpm workspace 组织 |
-| Docker | 含 Compose | PostgreSQL / Redis / Kafka 全在容器里，本地不用单独装 |
+---
 
-### 3.2 本地开发启动
+## 5. 部署启动方法
+
+### 5.1 本地开发启动
 
 #### 首次启动（每台机器做一次）
 
@@ -77,7 +121,7 @@ pnpm --filter backend db:deploy
 pnpm dev
 ```
 
-一条命令同时拉起前后端（前端 5173、后端 3000），日志混在一起输出。想分开看日志就开两个终端：
+一条命令同时拉起下面两条命令: 前后端（前端 5173、后端 3000），日志混在一起输出。想分开看日志就开两个终端：
 
 ```bash
 pnpm --filter backend dev      # 终端 1：后端 3000
@@ -93,7 +137,7 @@ pnpm --filter backend infra:up   # 把三个容器拉回来
 pnpm dev
 ```
 
-### 3.3 端口
+### 5.2 端口
 
 | 服务 | 端口 | 说明 |
 | --- | --- | --- |
@@ -103,7 +147,7 @@ pnpm dev
 | Redis | 6379 | 缓存 / 限流 / 分布式锁 / 协同广播 |
 | Kafka | 9092 | 异步任务（归档、审计）；9094 仅供宿主机调试 |
 
-### 3.4 验证安装
+### 5.3 验证安装
 
 ```bash
 # 单元测试（不需要任何服务在跑）
@@ -117,14 +161,14 @@ pnpm --filter frontend test:smoke   # 经 vite 代理的完整接入链路
 
 冒烟脚本打的是**真实服务**，会建真实用户和文档，多次运行用时间戳做标识、互不干扰。
 
-### 3.5 试一下协同
+### 5.4 试一下协同
 
 1. 登录后新建一个文档，点进去
 2. 复制地址栏链接，开一个**隐身窗口**登录另一个账号，粘贴打开
 3. 两边同时改内容 —— 应该实时互相看到；对方头像会出现在顶栏
 4. 点「保存」存一版，右侧「版本历史」里可以回滚
 
-### 3.6 生产部署（一键）
+### 5.5 生产部署（一键）
 
 单机 Docker Compose，一条命令：
 
@@ -189,51 +233,69 @@ docker exec pgclouddoc-prod-postgres-1 pg_dump -U pgclouddoc pgclouddoc | gzip >
 
 ---
 
-## 4. 目录结构介绍
+## 6. 协同编辑
+
+多人同时打开一份文档时，改动实时合并、互不覆盖；能看到谁在线、对方在选哪片区域、谁有权限改。底层用 Yjs（CRDT），服务端只做落库与转发，冲突合并由各客户端完成。
+
+### 6.1 能力一览
+
+| 能力 | 表现 |
+| --- | --- |
+| 实时同步 | 输入即广播，多人同时改同一格的不同字段也不会丢 |
+| 在线状态 | 顶栏显示协作者头像与人数，颜色区分身份 |
+| 选区可见 | 别人的选区以半透明色块 + 名字标签显示 |
+| 权限 | 创建者 / 编辑 / 只读 / 不可见，无权限可申请 |
+| 只读 | 可浏览、选中、复制，不能写入（前后端双重拦截） |
+| 版本 | 「保存为版本」，可查看历史并回滚 |
+| 通知 | 申请、审批结果等消息实时推送，离线不丢 |
+
+### 6.2 一次编辑的流转
 
 ```text
-PgCloudDoc/
-├── backend/          NestJS 服务端
-│   ├── prisma/       数据模型 + 迁移（含存储过程、视图）
-│   ├── src/
-│   │   ├── config/       环境变量 zod 校验 + 分层配置
-│   │   ├── common/       横切：中间件 / 异常过滤器 / 拦截器 / Guard / 装饰器 / 错误码
-│   │   ├── component/    工作表数据定义（IWorkbookData 示例，旧 /api/testSheet 用）
-│   │   ├── infra/        prisma · redis · kafka · yjs
-│   │   └── modules/      auth · users · documents · collab · jobs · health
-│   ├── kafka/        Kafka 单节点配置（开发用）
-│   ├── Dockerfile    多阶段构建：deps → build → prod-deps → migrator → runtime
-│   ├── test/         集成冒烟脚本
-│   └── README.md     后端架构、接口文档、设计决策
-│
-├── frontend/         React + Vite 前端
-│   ├── src/
-│   │   ├── app/api/          HTTP 客户端 + 接口封装
-│   │   ├── app/auth/         登录态、登录/注册页
-│   │   ├── app/documents/    文档列表
-│   │   ├── app/editor/       编辑器页
-│   │   ├── app/collab/       CRDT 协同（Y.Doc ↔ 引擎双向桥）
-│   │   ├── app/spreadsheet/  自研表格引擎（canvas 渲染 + 撤销重做）
-│   │   └── shared/           共享组件（如应用外壳 AppLayout）
-│   ├── Dockerfile    nginx + 静态产物
-│   └── test/         单测 + 集成冒烟
-│
-├── deploy/           生产部署
-│   ├── deploy.mjs             一键部署脚本
-│   ├── docker-compose.prod.yml
-│   ├── nginx.conf             静态托管 + /api、/collab 反向代理
-│   ├── nginx-proxy-headers.inc 反代公共头（include 片段）
-│   ├── kafka/server.properties 双 listener 配置
-│   └── .env.production.example 变量模板（真实值部署时生成）
-│
-└── package.json      pnpm workspace 根
+你敲键盘
+  → 引擎写入本地 Y.Doc（只产生一条几十字节的 update）
+  → WebSocket 发给服务端
+  → 服务端落库 document_updates + 广播给房间里的其他人
+  → 对方应用到自己的 Y.Doc → 写回引擎 → 重绘
 ```
+
+- 服务端不做冲突变换：CRDT 保证任意顺序应用结果一致
+- 只传增量，不传整份文档
+- 自己发的改动不会自己再应用一遍（origin 标记防回声）
+
+### 6.3 在线状态与选区
+
+- awareness 通道同步用户信息、颜色和选区（活动格 + 多选矩形）
+- 选区画在自己选区下面，带名字标签；颜色按 userId 哈希，与头像一致
+- 进入文档即广播一次选区；拖选时按 50ms 合帧，不会把界面刷爆
+- 同一账号的多个标签页只算一个协作者
+
+### 6.4 权限与审批
+
+- 四级可见性：创建者 / 编辑 / 只读 / 不可见
+- 不可见返回 404（防 id 枚举），角色不足返回 403
+- 无权限 → 申请页 → 创建者收消息 → 审批时选「只读 / 编辑」→ 结果回推申请人
+- 只读双保险：前端引擎禁用写入，服务端丢弃只读用户的 update
+- 创建者可随时调整协作者角色或移除成员
+
+### 6.5 保存、版本与容错
+
+- **保存是存档**：编辑已实时落库，「保存为版本」只是留一个可回滚的历史点
+- 内容没变就不产生版本（前后端都按内容指纹判断）
+- 自动归档（空闲 30s / 最后一人断线）只刷新元数据，不新增版本
+- 断线自动重连（指数退避）；重连现取 token，登录失效会先刷新
+- 服务端按连接精确清理在线状态，掉线后别人的选区不会残留
+
+### 6.6 边界
+
+- 多实例部署需要按文档 id 做粘性负载均衡（Y.Doc 在进程内存）
+- 异常掉线（进程被杀、断网）依赖 30 秒超时才清掉在线状态
 
 ---
 
-## 5. 总体技术栈与技术细节
+## 7. 总体技术栈与技术细节
 
-### 5.1 技术栈
+### 7.1 技术栈
 
 | 层 | 技术 | 用途 |
 | --- | --- | --- |
@@ -245,7 +307,7 @@ PgCloudDoc/
 | 消息 | Kafka 3.9（kafkajs） | 异步归档、审计 |
 | 部署 | Docker Compose · nginx | 单机容器化、同源反代 |
 
-### 5.2 架构流
+### 7.2 架构流
 
 ```text
 浏览器 (React + Yjs)
@@ -261,7 +323,7 @@ NestJS 后端
    └── Kafka 事件总线 ──► jobs（归档 / 审计，幂等消费）
 ```
 
-### 5.3 关键设计
+### 7.3 关键设计
 
 更完整的来龙去脉见 [backend/README.md](backend/README.md)，这里摘录要点：
 
@@ -299,6 +361,14 @@ NestJS 后端
 
 ```powershell
 Get-NetTCPConnection -LocalPort 5173 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
+```
+
+**控制台日志中文乱码（如 `鎺ュ叆鍗忓悓`）**
+
+不是服务端问题：Node 始终输出 UTF-8，是 Windows 终端按 GBK（代码页 936）解码导致的显示问题。在那个终端执行 `chcp 65001` 即可；要永久生效，在 PowerShell 配置文件（`$PROFILE`）里加一行：
+
+```powershell
+$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 ```
 
 **改了 `backend/.env` 不生效**

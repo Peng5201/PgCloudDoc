@@ -29,6 +29,12 @@ enum DocumentStatus {
   DELETED
 }
 
+enum AccessRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 enum MemberRole {
   OWNER
   EDITOR
@@ -56,6 +62,8 @@ model User {
   documents     Document[]
   memberships   DocumentMember[]
   auditLogs     AuditLog[]
+  accessRequests DocumentAccessRequest[]
+  notifications  Notification[]
 
   @@map("users")
 }
@@ -125,6 +133,7 @@ model Document {
   members  DocumentMember[]
   updates  DocumentUpdate[]
   versions DocumentVersion[]
+  accessRequests DocumentAccessRequest[]
 
   /// 列表页主查询路径：按用户 + 未删除 + 最近更新排序
   @@index([ownerId, status, updatedAt(sort: Desc)])
@@ -182,6 +191,44 @@ model DocumentVersion {
   @@unique([documentId, versionNo])
   @@index([documentId, createdAt(sort: Desc)])
   @@map("document_versions")
+}
+
+/// 访问申请。无权限用户请求访问某个文档，由创建者审批
+model DocumentAccessRequest {
+  id          String              @id @default(uuid()) @map("id")
+  documentId  String              @map("document_id")
+  requesterId String              @map("requester_id")
+  status      AccessRequestStatus @default(PENDING) @map("status")
+  decidedBy   String?             @map("decided_by")
+  /// 同意时授予的角色（审批时选择只读/编辑）
+  decidedRole MemberRole?         @map("decided_role")
+  createdAt   DateTime            @default(now()) @map("created_at")
+  decidedAt   DateTime?           @map("decided_at")
+
+  document  Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  requester User     @relation(fields: [requesterId], references: [id], onDelete: Cascade)
+
+  @@index([documentId, status])
+  @@index([requesterId, status])
+  @@map("document_access_requests")
+}
+
+/// 站内消息（左下角弹框）。申请审批、系统通知等统一走这里
+model Notification {
+  id        String    @id @default(uuid()) @map("id")
+  userId    String    @map("user_id")
+  type      String    @map("type")
+  title     String    @map("title")
+  body      String?   @map("body")
+  payload   Json?     @map("payload")
+  readAt    DateTime? @map("read_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt, createdAt(sort: Desc)])
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("notifications")
 }
 
 // ────────────────────────────── 平台 ──────────────────────────────

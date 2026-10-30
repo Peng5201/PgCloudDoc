@@ -17,6 +17,7 @@ export {
     forEachVisibleCell,
     inView,
     type IDrawContext,
+    type IRemoteSelection,
     type ISheetExtension,
 } from './extension';
 
@@ -24,4 +25,5 @@ export { backgroundExtension } from './background';
 export { gridExtension } from './grid';
 export { borderExtension } from './border';
 export { fontExtension } from './font';
+export { remoteSelectionExtension } from './remote-selection';
 export { selectionExtension } from './selection';

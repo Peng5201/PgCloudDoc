@@ -179,6 +179,16 @@ async function unwrap<T>(response: Response): Promise<T> {
 }
 
 /**
+ * 主动刷新 access token。
+ *
+ * WebSocket 用它：连接被服务端以 4001（登录失效）关掉时，先刷一次 token，
+ * 下一次重连才能带上有效的凭证，而不是拿旧 token 一直重试。
+ */
+export function refreshAccessToken(): Promise<boolean> {
+    return tryRefresh();
+}
+
+/**
  * 用 refresh cookie 换一对新 token。
  * 返回是否成功；失败不抛错 —— 调用方只关心「能不能继续」。
  */

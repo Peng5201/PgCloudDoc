@@ -39,17 +39,31 @@ export class SnapshotWorker implements OnModuleInit {
         event: DocSnapshotRequestedEvent,
         ctx: { attempt: number }
     ): Promise<void> {
+        // 自动触发（空闲 / 断线）只刷新快照元数据，不产生版本 ——
+        // 版本只由用户显式「保存为版本」创建
+        if (event.reason === 'idle') {
+            await this.documents.refreshSnapshotMeta(event.documentId);
+            this.logger.debug(`文档 ${event.documentId} 已刷新快照（不产生版本）`);
+            return;
+        }
+
         this.logger.log(
             `归档文档 ${event.documentId} reason=${event.reason} attempt=${ctx.attempt}`
         );
 
         // 同一文档的归档串行：并发跑会写出两个只差几毫秒的版本，纯属噪音
         await this.lock.withLock(`archive:${event.documentId}`, async () => {
-            const { versionNo } = await this.documents.archive(
+            const { versionNo, created } = await this.documents.archive(
                 event.documentId,
                 event.userId,
                 `自动归档（${event.reason}）`
             );
+
+            if (!created) {
+                // 和上一版内容一致：不新增版本，也不打扰在线用户
+                this.logger.debug(`文档 ${event.documentId} 内容未变，跳过归档`);
+                return;
+            }
 
             this.logger.log(`文档 ${event.documentId} 归档到版本 ${versionNo}`);
             this.collab.notifySnapshotSaved(event.documentId, versionNo);

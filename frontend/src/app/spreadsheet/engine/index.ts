@@ -24,6 +24,7 @@ import type {
 } from './model/types';
 import { HorizontalAlign as HA, VerticalAlign as VA, WrapStrategy as WS } from './model/types';
 import { Renderer } from './render/renderer';
+import type { IRemoteSelection } from './render/extensions';
 import { SheetSkeleton } from './render/skeleton';
 import { Controller, MAX_ZOOM, MIN_ZOOM, type ISheetRef } from './interact/controller';
 import {
@@ -103,6 +104,8 @@ export interface ISheetEngineOptions {
     historyLimit?: number;
     /** 把实例挂到 window.__sheetEngine，方便 DevTools 里灌数据压测 */
     exposeGlobal?: boolean;
+    /** 只读：允许浏览/选中/复制，禁止一切写操作 */
+    readOnly?: boolean;
 }
 
 /**
@@ -150,7 +153,7 @@ const EMPTY_STATS: ISelectionStats = {
 const STATS_CELL_LIMIT = 20000;
 
 export class SheetEngine {
-    /** 工作簿模型。改数据请走 execute() / setRangeStyle()，别直接改这里 */
+    /** 工作簿对象。改数据请走 execute() / setRangeStyle()，别直接改这里 */
     get workbook(): Workbook {
         return this._workbook;
     }
@@ -160,6 +163,7 @@ export class SheetEngine {
     readonly controller: Controller;
 
     private _workbook: Workbook;
+    private _readOnly = false;
 
     private readonly _measureCtx: CanvasRenderingContext2D;
     private readonly _skeletons = new Map<string, SheetSkeleton>();
@@ -172,9 +176,16 @@ export class SheetEngine {
     private _changeHooks: IEngineChangeHooks | null = null;
 
     constructor(options: ISheetEngineOptions) {
-        const { container, snapshot, historyLimit = 200, exposeGlobal = true } = options;
+        const {
+            container,
+            snapshot,
+            historyLimit = 200,
+            exposeGlobal = true,
+            readOnly = false,
+        } = options;
+        this._readOnly = readOnly;
 
-        // 1. 模型层
+        // 1. 工作簿对象
         this._workbook = loadWorkbook(snapshot ?? {});
 
         // 2. 渲染层。容器必须有明确尺寸，canvas 才能正常工作
@@ -246,6 +257,7 @@ export class SheetEngine {
 
         // selection 用 getter：Controller 会整体替换 selection 对象，存快照会过期
         this.renderer.getSelection = () => this.controller.selection;
+        this.controller.setReadOnly(this._readOnly);
 
         this._resizeObserver = new ResizeObserver(() => this.renderer.invalidate());
         this._resizeObserver.observe(container);
@@ -390,10 +402,24 @@ export class SheetEngine {
         return this.controller.selection;
     }
 
+    // ─────────────────────────── 只读 ───────────────────────────
+
+    get isReadOnly(): boolean {
+        return this._readOnly;
+    }
+
+    /** 只读：允许浏览/选中/复制，禁止一切写操作 */
+    setReadOnly(readonly: boolean): void {
+        this._readOnly = readonly;
+        this.controller.setReadOnly(readonly);
+        this.renderer.invalidate();
+    }
+
     // ─────────────────────────── 命令 ───────────────────────────
 
     /** 执行任意编辑并入撤销栈 */
     execute(edit: IEdit): void {
+        if (this._readOnly) return;
         this.history.push(edit);
     }
 
@@ -402,6 +428,7 @@ export class SheetEngine {
         patch: IStylePatch | ((row: number, column: number, range: IRange) => IStylePatch),
         label = '设置样式'
     ): void {
+        if (this._readOnly) return;
         const worksheet = this._ref.worksheet;
         for (const range of this.controller.selection.ranges) {
             this.history.push(createSetRangeStylesEdit(this.workbook, worksheet, range, patch, label));
@@ -419,15 +446,18 @@ export class SheetEngine {
     }
 
     clearSelection(): void {
+        if (this._readOnly) return;
         this.controller.clearSelection();
         this._emit('content-change');
     }
 
     undo(): void {
+        if (this._readOnly) return;
         this.history.undo();
     }
 
     redo(): void {
+        if (this._readOnly) return;
         this.history.redo();
     }
 
@@ -435,6 +465,14 @@ export class SheetEngine {
 
     setZoom(zoom: number): void {
         this.controller.setZoom(clamp(zoom, MIN_ZOOM, MAX_ZOOM));
+    }
+
+    /**
+     * 更新其他协作者的选区。只影响渲染，不碰数据 —— 由协同层在 peers 变化时调用。
+     */
+    setRemoteSelections(selections: IRemoteSelection[]): void {
+        this.renderer.remoteSelections = selections;
+        this.renderer.invalidate();
     }
 
     get zoom(): number {
@@ -495,6 +533,7 @@ export class SheetEngine {
 
     /** 新增一张空表并切过去，返回新表 id */
     addSheet(name?: string): string {
+        if (this._readOnly) return '';
         const index = this.workbook.sheetOrder.length;
         const id = `sheet${Date.now().toString(36)}`;
         const sheet = createEmptyWorksheet({
@@ -504,13 +543,14 @@ export class SheetEngine {
             columnCount: this._ref.worksheet.columnCount,
         });
         this.workbook.addSheet(sheet);
-        this._wireWorksheet(sheet);
+        this._registerWorksheet(sheet);
         this.setActiveSheet(id);
         this._emit('content-change');
         return id;
     }
 
     removeSheet(sheetId: string): boolean {
+        if (this._readOnly) return false;
         // 至少留一张表，否则整个视图没东西可画
         if (this.workbook.sheetOrder.length <= 1) return false;
 
@@ -528,6 +568,7 @@ export class SheetEngine {
     }
 
     renameSheet(sheetId: string, name: string): boolean {
+        if (this._readOnly) return false;
         const ok = this.workbook.renameSheet(sheetId, name);
         if (ok) {
             this._emit('content-change');
@@ -540,17 +581,17 @@ export class SheetEngine {
 
     /**
      * 接上协同层。调用后所有本地数据变更都会回调出去。
-     * 一个引擎只接一个协同层（重复调用会覆盖）。
+     * 一个 `SheetEngine` 只接一个协同层（重复调用会覆盖）。
      */
     attachChangeHooks(hooks: IEngineChangeHooks | null): void {
         this._changeHooks = hooks;
         for (const sheet of this.workbook.getSheets()) {
-            this._wireWorksheet(sheet);
+            this._registerWorksheet(sheet);
         }
     }
 
-    /** 给某张表的三个矩阵挂上回调。新加的表也要走一遍 */
-    private _wireWorksheet(worksheet: Worksheet): void {
+    /** 给某张表的三个数据注册回调。新加的表也要走一遍 */
+    private _registerWorksheet(worksheet: Worksheet): void {
         const hooks = this._changeHooks;
         const sheetId = worksheet.id;
 
@@ -567,7 +608,7 @@ export class SheetEngine {
     }
 
     /**
-     * 远端改动已写进模型，通知 UI 刷新。
+     * 远端改动已写进工作表，通知 UI 刷新。
      *
      * 协同层收到别人更新后用 `applySilently` 写进矩阵（不触发 onChange 防回声），
      * 写完调这里把骨架缓存作废、重绘、发 content-change 让 React 重渲染。
@@ -599,7 +640,7 @@ export class SheetEngine {
         this.history.clear();
         // 新的 worksheet 对象要重新挂协同钩子
         for (const sheet of this._workbook.getSheets()) {
-            this._wireWorksheet(sheet);
+            this._registerWorksheet(sheet);
         }
 
         const worksheet = this._workbook.getActiveSheet();
@@ -679,6 +720,7 @@ export {
 } from './command/clipboard';
 export { SheetSkeleton, cellReference, columnLabel, parseCellReference } from './render/skeleton';
 export { Renderer } from './render/renderer';
+export type { IRemoteSelection } from './render/extensions';
 export {
     allSelection,
     columnSelection,

@@ -1,12 +1,12 @@
 /**
- * snapshot ↔ 模型 的装载/导出。
+ * snapshot ↔ 工作簿对象 的装载/导出。
  *
  * 对照 Univer: packages/core/src/sheets/workbook.ts 的构造 +
  *              packages/core/src/services/snapshot/snapshot.service.ts
  *
  * 这里是唯一「知道服务端数据可能不完整」的地方：
  * 后端吐的是 Partial<IWorksheetData>，缺的字段在这里补默认值。
- * 补完之后模型层就不用到处 `?? DEFAULT` 了。
+ * 补完之后数据层就不用到处 `?? DEFAULT` 了。
  */
 
 import { ObjectMatrix } from './object-matrix';

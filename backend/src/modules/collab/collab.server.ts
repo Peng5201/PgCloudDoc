@@ -60,6 +60,14 @@ interface ClientState {
     documentId: string;
     userId: string;
     username: string;
+    /** 该用户在这个文档里的角色，VIEWER 的写入会被丢弃 */
+    role: 'OWNER' | 'EDITOR' | 'VIEWER';
+    /**
+     * 这个连接在 awareness 里用过的 clientID。
+     * 断线时要按它们精确摘除 —— 用服务端 awareness 自己的 clientID 是错的，
+     * 那会导致对方的"幽灵选区"一直留到 30 秒超时。
+     */
+    awarenessIds: Set<number>;
 }
 
 interface Room {
@@ -69,7 +77,7 @@ interface Room {
     clients: Set<ClientState>;
     /** 该文档 update 的广播器，整个房间只挂一个（挂 N 个会重复广播） */
     onUpdate: (update: Uint8Array, origin: unknown) => void;
-    /** 空闲归档计时器 */
+    /** 空闲快照刷新计时器 */
     idleTimer?: NodeJS.Timeout;
 }
 
@@ -157,8 +165,9 @@ export class CollabServer implements OnModuleDestroy {
         }
 
         // ── 文档访问权（越权与不存在同语义，防探测） ──
+        let role: 'OWNER' | 'EDITOR' | 'VIEWER';
         try {
-            await this.documents.getAccessibleRow(userId, documentId);
+            ({ role } = await this.documents.getAccessibleRow(userId, documentId));
         } catch {
             this.close(ws, 4004, '文档不存在');
             return;
@@ -171,6 +180,8 @@ export class CollabServer implements OnModuleDestroy {
             documentId,
             userId,
             username,
+            role,
+            awarenessIds: new Set(),
         };
         room.clients.add(client);
 
@@ -198,19 +209,23 @@ export class CollabServer implements OnModuleDestroy {
     private onDisconnect(room: Room, client: ClientState): void {
         room.clients.delete(client);
 
-        // 把这个人的 awareness 状态撤掉并广播，别人才会看到他下线了
-        awarenessProtocol.removeAwarenessStates(
-            room.awareness,
-            [room.awareness.clientID],
-            'disconnect'
-        );
+        // 把这个人的 awareness 状态撤掉并广播，别人才会立刻看到他下线。
+        // 只摘掉这个连接自己的 clientID；用 room.awareness.clientID 会删错对象，
+        // 对方的选区会以"幽灵"形式一直留到 30 秒超时。
+        const ids = [...client.awarenessIds];
+        if (ids.length > 0) {
+            awarenessProtocol.removeAwarenessStates(room.awareness, ids, 'disconnect');
+            // 摘除本身也要广播：否则其他客户端要等自己的超时才清掉
+            const removal = awarenessProtocol.encodeAwarenessUpdate(room.awareness, ids);
+            this.broadcast(room, encodeFrame(MESSAGE_AWARENESS, removal));
+        }
 
         this.logger.log(
             `断开协同 ${room.documentId} user=${client.username} 在线=${room.clients.size}`
         );
 
         if (room.clients.size === 0) {
-            // 最后一个人走了：立刻归档留档，然后拆房间释放内存
+            // 最后一个人走了：刷新一次快照元数据（不产生版本），然后拆房间释放内存
             if (room.idleTimer) clearTimeout(room.idleTimer);
             void this.documents
                 .requestArchive(room.documentId, undefined, 'idle')
@@ -256,6 +271,14 @@ export class CollabServer implements OnModuleDestroy {
      * 服务端不做任何变换 —— CRDT 的合并由客户端各自完成。
      */
     private handleSync(room: Room, client: ClientState, payload: Uint8Array): void {
+        // 只读用户只能拉状态（syncStep1），不能提交 update。
+        // 前端虽然用 readOnly 引擎拦了输入，但 WS 才是真正的边界。
+        const subType = decoding.readVarUint(decoding.createDecoder(payload));
+        if (client.role === 'VIEWER' && subType === syncProtocol.messageYjsUpdate) {
+            this.logger.debug(`丢弃只读用户 ${client.username} 的 update`);
+            return;
+        }
+
         const decoder = decoding.createDecoder(payload);
         const encoder = encoding.createEncoder();
         encoding.writeVarUint(encoder, MESSAGE_SYNC);
@@ -271,6 +294,10 @@ export class CollabServer implements OnModuleDestroy {
     }
 
     private handleAwareness(room: Room, client: ClientState, payload: Uint8Array): void {
+        // 记下这个连接用过的 awareness clientID，断线时按它精确摘除
+        for (const id of readAwarenessClientIds(payload)) {
+            client.awarenessIds.add(id);
+        }
         awarenessProtocol.applyAwarenessUpdate(room.awareness, payload, client);
         // 原样转发给别人
         this.broadcast(room, encodeFrame(MESSAGE_AWARENESS, payload), client.socket);
@@ -312,11 +339,13 @@ export class CollabServer implements OnModuleDestroy {
         if (room.idleTimer) clearTimeout(room.idleTimer);
     }
 
-    // ─────────────────────────── 归档 ───────────────────────────
+    // ─────────────────────────── 快照刷新 ───────────────────────────
 
     /**
-     * 空闲检测：文档连续 N 毫秒没有 update，就异步归档一版。
-     * 「存档」不该依赖用户记得点保存 —— 这是云文档的基本预期。
+     * 空闲检测：文档连续 N 毫秒没有 update，就异步刷新一次快照元数据。
+     *
+     * **不产生版本** —— 版本只由用户显式「保存为版本」创建。
+     * 刷新只为了让列表里的体积、统计、更新时间保持准确。
      */
     private scheduleIdleSnapshot(room: Room): void {
         if (room.idleTimer) clearTimeout(room.idleTimer);
@@ -325,12 +354,12 @@ export class CollabServer implements OnModuleDestroy {
             void this.documents
                 .requestArchive(room.documentId, undefined, 'idle')
                 .catch((err: unknown) =>
-                    this.logger.warn(`空闲归档触发失败：${String(err)}`)
+                    this.logger.warn(`空闲快照刷新触发失败：${String(err)}`)
                 );
         }, this.config.collab.idleSnapshotMs);
     }
 
-    /** 归档完成后通知房间（前端可以提示「已自动保存」） */
+    /** 归档完成后通知房间（前端可以提示「已保存为版本 N」） */
     notifySnapshotSaved(documentId: string, versionNo: number): void {
         const room = this.rooms.get(documentId);
         if (!room) return;
@@ -418,4 +447,26 @@ function encodeSyncUpdate(update: Uint8Array): Uint8Array {
     encoding.writeVarUint(encoder, syncProtocol.messageYjsUpdate);
     encoding.writeVarUint8Array(encoder, update);
     return encoding.toUint8Array(encoder);
+}
+
+/**
+ * 从 awareness update 里读出涉及的 clientID。
+ *
+ * 格式（y-protocols/awareness）：
+ *   varUint 条目数，然后每条 [clientID, clock, state(JSON)]
+ */
+function readAwarenessClientIds(payload: Uint8Array): number[] {
+    try {
+        const decoder = decoding.createDecoder(payload);
+        const len = decoding.readVarUint(decoder);
+        const ids: number[] = [];
+        for (let i = 0; i < len; i++) {
+            ids.push(decoding.readVarUint(decoder));
+            decoding.readVarUint(decoder); // clock
+            decoding.readVarString(decoder); // state JSON
+        }
+        return ids;
+    } catch {
+        return [];
+    }
 }

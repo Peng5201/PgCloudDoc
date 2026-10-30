@@ -29,14 +29,23 @@ const ALL_EVENTS: EngineEvent[] = [
     'edit-change',
 ];
 
+/**
+ * useSheetEngine 的返回值。
+ *
+ * 两个字段分工：`engine` 用来「下命令」，`state` 用来「读状态」。
+ * 两者都从 null 起步 —— 容器没挂上、快照还没给时是 null，调用方要先判空。
+ */
 export interface UseSheetEngineResult {
+    /** 引擎实例，UI 靠它调方法（执行命令、撤销重做、改样式等） */
     engine: SheetEngine | null;
+    /** 引擎状态快照，React 层只读这个来渲染；由引擎按帧合并更新，不要自己算 */
     state: ISheetState | null;
 }
 
 export function useSheetEngine(
     containerRef: React.RefObject<HTMLDivElement | null>,
-    snapshot: Partial<IWorkbookData> | null
+    snapshot: Partial<IWorkbookData> | null,
+    readOnly = false
 ): UseSheetEngineResult {
     const [engine, setEngine] = useState<SheetEngine | null>(null);
     const [state, setState] = useState<ISheetState | null>(null);
@@ -44,11 +53,16 @@ export function useSheetEngine(
     // 用 ref 兜住 engine，让回调闭包拿到的是当前实例而不是首帧的 null
     const engineRef = useRef<SheetEngine | null>(null);
 
+    // readOnly 变化时热更新，不重建引擎（重建会丢滚动位置/选区）
+    useEffect(() => {
+        engineRef.current?.setReadOnly(readOnly);
+    }, [readOnly]);
+
     useEffect(() => {
         const container = containerRef.current;
         if (!container || !snapshot) return;
 
-        const instance = new SheetEngine({ container, snapshot });
+        const instance = new SheetEngine({ container, snapshot, readOnly });
         engineRef.current = instance;
         setEngine(instance);
         setState(instance.getState());

@@ -1,5 +1,5 @@
 /**
- * 选择模型。
+ * 选择状态。
  *
  * 对照 Univer: packages/sheets/src/services/selections/
  *
@@ -126,7 +126,7 @@ export function selectedCount(selection: ISelection): number {
  * 选区标注：单格是 `B3`，多格是 `B3:D7`，整列是 `A:A`，整行是 `2:2`。
  * 多块选区用逗号分隔。
  *
- * 判断「整列」要拿工作表的总行数来比 —— 选区在模型里一律是具体矩形，
+ * 判断「整列」要拿工作表的总行数来比 —— 选区在数据里一律是具体矩形，
  * 没有「整列」这种特殊形态，只能看它是不是上下顶到头。
  */
 export function rangeLabel(selection: ISelection, rowCount = 0, columnCount = 0): string {

@@ -1,9 +1,9 @@
 /**
- * 工作表模型。
+ * 工作表对象。
  *
  * 对照 Univer: packages/core/src/sheets/worksheet.ts (1463 行)
  *
- * 职责边界：模型层**完全不知道** canvas 的存在。
+ * 职责边界：数据层**完全不知道** canvas 的存在。
  * 渲染层来读它，它不主动通知谁 —— 变更通知由 SheetEngine 的事件总线统一发。
  */
 

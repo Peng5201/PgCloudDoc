@@ -17,6 +17,12 @@ export default defineConfig({
         ws: true,
         changeOrigin: true,
       },
+      // 站内消息 WebSocket（用户级通知）
+      '/notifications': {
+        target: 'ws://localhost:3000',
+        ws: true,
+        changeOrigin: true,
+      },
     },
   },
   build: {

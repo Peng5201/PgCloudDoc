@@ -23,6 +23,16 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* 桌面应用手感：UI 组件（按钮/菜单/标签）的文字不参与鼠标拖选 */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* 输入框里要能正常选中/编辑文字 */
+input,
+textarea {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 /* 路由挂载点：让每一页都能 height:100% 撑满 */

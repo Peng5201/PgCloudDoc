@@ -23,6 +23,7 @@ import { DocumentsModule } from './modules/documents/documents.module';
 import { CollabModule } from './modules/collab/collab.module';
 import { JobsModule } from './modules/jobs/jobs.module';
 import { HealthModule } from './modules/health/health.module';
+import { NotificationsModule } from './modules/notifications/notifications.module';
 
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
@@ -113,6 +114,7 @@ import { AppService } from './app.service';
         CollabModule,
         JobsModule,
         HealthModule,
+        NotificationsModule,
     ],
     controllers: [AppController],
     providers: [

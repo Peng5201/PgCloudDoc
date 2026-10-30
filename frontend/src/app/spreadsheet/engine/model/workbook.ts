@@ -1,5 +1,5 @@
 /**
- * 工作簿模型 —— 顶层容器。
+ * 工作簿对象 —— 顶层容器。
  *
  * 对照 Univer: packages/core/src/sheets/workbook.ts (511 行)
  *

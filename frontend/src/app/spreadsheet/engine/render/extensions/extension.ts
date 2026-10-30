@@ -10,9 +10,22 @@
  */
 
 import type { ISelection } from '../../interact/selection';
-import type { ICellData, IStyleData, ObjectMatrixPrimitive } from '../../model/types';
+import type { ICellData, IRange, IStyleData, ObjectMatrixPrimitive } from '../../model/types';
 import type { Worksheet } from '../../model/worksheet';
 import type { IViewRect, SheetSkeleton } from '../skeleton';
+
+/** 其他协作者的选区（渲染层只读消费，由协同层灌进来） */
+export interface IRemoteSelection {
+    /** 协作者标识（awareness clientId），只用于 React 侧去重 */
+    key: string | number;
+    /** 显示名，画成小标签 */
+    name: string;
+    /** 该协作者的固定颜色（与顶栏头像一致） */
+    color: string;
+    ranges: IRange[];
+    /** 当前活动单元格 */
+    active?: { row: number; column: number };
+}
 
 /** 绘制上下文 —— 传给每个 extension 的全部信息 */
 export interface IDrawContext {
@@ -24,6 +37,8 @@ export interface IDrawContext {
     view: IViewRect;
     /** 选择状态（selection 层会用到） */
     selection: ISelection;
+    /** 其他协作者的选区（remote-selection 层用） */
+    remoteSelections: IRemoteSelection[];
     /** 缩放比。文字换行宽度要按它算，否则缩放后断行位置错乱 */
     zoom: number;
 }
@@ -40,6 +55,8 @@ export const EXTENSION_ORDER = {
     GRID: 10,
     BORDER: 20,
     FONT: 30,
+    /** 别人的选区画在自己下面：自己的高亮永远是最后、最显眼的 */
+    REMOTE_SELECTION: 90,
     SELECTION: 100,
 } as const;
 

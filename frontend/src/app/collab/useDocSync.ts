@@ -4,23 +4,37 @@
  * 管三件事：
  *   1. DocSync 的生命周期（挂载建、卸载销毁）
  *   2. 把 status / peers 同步成 React 状态
- *   3. 提供「等首次同步完成」的 Promise —— 编辑器要等数据到了才渲染引擎
+ *   3. `load()`：把「建连 → 获取数据 → 序列化 → 交给渲染」串成一条流程，
+ *      编辑器只需 `await load()` 拿快照去渲染，不用关心中间每一步。
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { DocSync, type ConnectionStatus, type Peer, type SyncStatus } from './doc-sync';
-import type { SheetEngine } from '../spreadsheet/engine';
+import type { IWorkbookData, SheetEngine } from '../spreadsheet/engine';
 import { getAccessToken } from '../api/client';
+import { documentsApi } from '../api/documents';
 import { useAuth } from '../auth/AuthContext';
+
+/** 加载完成后交给渲染层的东西：序列化好的快照 + 元信息 */
+export interface LoadedDocument {
+    /** 序列化好的本地快照对象，直接喂给引擎渲染 */
+    snapshot: IWorkbookData;
+    docName: string;
+    /** 数据来自实时协同还是离线快照 */
+    source: 'collab' | 'snapshot';
+}
 
 export interface UseDocSyncResult {
     docSync: DocSync | null;
     status: ConnectionStatus;
     notice: SyncStatus['notice'];
     peers: Peer[];
-    /** 等首次同步（或超时）完成。返回是否真的从协同通道拿到了数据 */
-    waitUntilReady: (timeoutMs?: number) => Promise<boolean>;
+    /** 引擎接上协同后，本地改动才会实时同步出去 */
     attach: (engine: SheetEngine | null) => void;
+    /** 建连 → 获取数据 → 序列化 → 返回快照，一条流程走完 */
+    load: () => Promise<LoadedDocument>;
+    /** 强制重连（丢掉可能卡死的连接再建一条） */
+    reconnect: () => void;
 }
 
 export interface UseDocSyncOptions {
@@ -68,8 +82,7 @@ export function useDocSync(
         });
         const offPeers = sync.onPeers(setPeers);
 
-        sync.connect();
-
+        // 这里只建实例、订状态，不连网 —— 建连是 load() 流程的第一步
         return () => {
             offStatus();
             offPeers();
@@ -121,6 +134,50 @@ export function useDocSync(
         });
     }, []);
 
+    /**
+     * 文档加载流程，编辑器只需 `await load()` 拿快照去渲染。
+     *
+     *   ① 建连：建立 WebSocket、完成 Yjs 握手
+     *   ② 获取数据：等首次同步完成（3s 超时）
+     *   ③ 序列化为本地对象：Y.Doc → 引擎能吃的 IWorkbookData 快照
+     *   ④ 交给渲染：返回 LoadedDocument，调用方 setSnapshot 即触发渲染
+     *
+     * 协同通道拿不到数据时，② 会降级去拉 REST 快照（③ 直接返回快照内容）。
+     */
+    const load = useCallback(async (): Promise<LoadedDocument> => {
+        const sync = docSyncRef.current;
+        if (!sync) {
+            // 正常不会走到：调用方应在 docSync 就绪后再 load。防御性断言。
+            throw new Error('协同实例尚未就绪');
+        }
+
+        // ① 建连
+        sync.connect();
+
+        // ② 获取数据
+        const viaSync = await waitUntilReady();
+
+        // ③ 序列化为本地对象 + ④ 返回给调用方渲染
+        if (viaSync) {
+            return {
+                snapshot: sync.materialize(),
+                docName: sync.getName(),
+                source: 'collab',
+            };
+        }
+
+        // 降级：协同通道不可用，至少让文档能打开（只读式编辑，改动不共享）
+        const [detail, snap] = await Promise.all([
+            documentsApi.detail(documentId),
+            documentsApi.snapshot(documentId),
+        ]);
+        return {
+            snapshot: snap,
+            docName: detail.name,
+            source: 'snapshot',
+        };
+    }, [docSync, waitUntilReady, documentId]);
+
     const attach = useCallback((engine: SheetEngine | null) => {
         const sync = docSyncRef.current;
         if (!sync) return;
@@ -131,7 +188,12 @@ export function useDocSync(
         }
     }, []);
 
-    return { docSync, status, notice, peers, waitUntilReady, attach };
+    /** 强制重连（「重新加载」用）：连接卡在 CONNECTING 时也要能重建 */
+    const reconnect = useCallback(() => {
+        docSyncRef.current?.reconnect();
+    }, []);
+
+    return { docSync, status, notice, peers, attach, load, reconnect };
 }
 
 /** doc 里是否已经有内容（服务端会推一张默认表过来） */

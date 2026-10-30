@@ -1,12 +1,13 @@
 /**
  * 应用外框：顶栏 + 内容区。
- * 顶栏放「回到文档列表 / 当前用户 / 退出」，文档列表和编辑器共用。
+ * 顶栏放「品牌 / 当前用户 / 退出」，文档列表和编辑器共用。
  */
 
 import type { ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Avatar, Button, Dropdown, Layout, Space, Typography, message } from 'antd';
 import { useAuth } from '../app/auth/AuthContext';
+import { NotificationCenter } from '../app/notifications/NotificationCenter';
 
 const { Header, Content } = Layout;
 const { Text } = Typography;
@@ -15,11 +16,9 @@ export interface AppLayoutProps {
     children: ReactNode;
     /** 顶栏右侧的额外操作（编辑器的保存/版本按钮放这里） */
     extra?: ReactNode;
-    /** 是否隐藏「文档列表」链接（就在列表页时） */
-    hideHomeLink?: boolean;
 }
 
-export function AppLayout({ children, extra, hideHomeLink }: AppLayoutProps) {
+export function AppLayout({ children, extra }: AppLayoutProps) {
     const { user, logout } = useAuth();
     const navigate = useNavigate();
 
@@ -36,15 +35,11 @@ export function AppLayout({ children, extra, hideHomeLink }: AppLayoutProps) {
                     <Link to="/" style={styles.brand}>
                         PgCloudDoc
                     </Link>
-                    {!hideHomeLink && (
-                        <Link to="/" style={styles.link}>
-                            文档列表
-                        </Link>
-                    )}
                 </Space>
 
                 <Space size={12}>
                     {extra}
+                    <NotificationCenter />
                     <Dropdown
                         menu={{
                             items: [
@@ -91,10 +86,6 @@ const styles = {
         color: '#fff',
         fontSize: 16,
         fontWeight: 600 as const,
-        textDecoration: 'none',
-    },
-    link: {
-        color: 'rgba(255,255,255,0.72)',
         textDecoration: 'none',
     },
     user: {

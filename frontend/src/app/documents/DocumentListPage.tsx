@@ -141,7 +141,7 @@ export function DocumentListPage() {
     }
 
     return (
-        <AppLayout hideHomeLink>
+        <AppLayout>
             <div style={styles.page}>
                 <div style={styles.toolbar}>
                     <Input

@@ -8,6 +8,7 @@
  */
 
 import {
+    IsIn,
     IsInt,
     IsNotEmpty,
     IsOptional,
@@ -86,9 +87,11 @@ export interface DocumentSummary {
     cellCount: number;
     createdAt: string;
     updatedAt: string;
+    /** 当前用户在该文档的角色 */
+    role: 'OWNER' | 'EDITOR' | 'VIEWER';
 }
 
-export interface DocumentDetail extends DocumentSummary {
+export interface DocumentDetail extends Omit<DocumentSummary, 'role'> {
     contentHash: string | null;
     deletedAt: string | null;
 }
@@ -100,4 +103,32 @@ export interface DocumentVersionDto {
     remark: string | null;
     sizeBytes: number;
     createdAt: string;
+}
+
+// ─────────────────────── 权限协作 ───────────────────────
+
+/** 审批访问申请时选择授予的角色 */
+export class ApproveAccessRequestDto {
+    @IsIn(['EDITOR', 'VIEWER'], { message: '角色只能是 EDITOR 或 VIEWER' })
+    role!: 'EDITOR' | 'VIEWER';
+}
+
+export interface MemberDto {
+    userId: string;
+    role: 'OWNER' | 'EDITOR' | 'VIEWER';
+    email: string;
+    username: string;
+    displayName: string | null;
+}
+
+export interface AccessRequestDto {
+    id: string;
+    requesterId: string;
+    requesterEmail: string;
+    requesterUsername: string;
+    requesterDisplayName: string | null;
+    status: 'PENDING' | 'APPROVED' | 'REJECTED';
+    decidedRole: 'EDITOR' | 'VIEWER' | null;
+    createdAt: string;
+    decidedAt: string | null;
 }

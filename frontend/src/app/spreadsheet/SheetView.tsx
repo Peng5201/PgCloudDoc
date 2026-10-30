@@ -23,11 +23,13 @@ export interface SheetViewProps {
      * 用 ref 转发，调用方不用关心回调的引用稳定性。
      */
     onEngineReady?: (engine: SheetEngine | null) => void;
+    /** 只读模式：禁用输入/编辑，仅可浏览、选中、复制 */
+    readOnly?: boolean;
 }
 
-export function SheetView({ snapshot, onEngineReady }: SheetViewProps) {
+export function SheetView({ snapshot, onEngineReady, readOnly = false }: SheetViewProps) {
     const containerRef = useRef<HTMLDivElement>(null);
-    const { engine, state } = useSheetEngine(containerRef, snapshot);
+    const { engine, state } = useSheetEngine(containerRef, snapshot, readOnly);
 
     const readyRef = useRef(onEngineReady);
     readyRef.current = onEngineReady;

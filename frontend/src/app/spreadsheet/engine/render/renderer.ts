@@ -17,12 +17,13 @@ import type { IStyleData } from '../model/types';
 import type { Worksheet } from '../model/worksheet';
 import type { SheetSkeleton } from './skeleton';
 import { columnLabel } from './skeleton';
-import type { IDrawContext, ISheetExtension } from './extensions';
+import type { IDrawContext, IRemoteSelection, ISheetExtension } from './extensions';
 import {
     backgroundExtension,
     borderExtension,
     fontExtension,
     gridExtension,
+    remoteSelectionExtension,
     selectionExtension,
 } from './extensions';
 
@@ -57,10 +58,12 @@ export class Renderer {
     /** 缩放，1 = 100% */
     zoom = 1;
 
-    // 由 SheetEngine 注入 —— 渲染层不持有模型所有权，只借引用
+    // 由 SheetEngine 注入 —— 渲染层不持有对象所有权，只借引用
     skeleton!: SheetSkeleton;
     worksheet!: Worksheet;
     styles: Record<string, IStyleData> = {};
+    /** 其他协作者的选区。由协同层通过 SheetEngine.setRemoteSelections 灌入 */
+    remoteSelections: IRemoteSelection[] = [];
     /** selection 用 getter：交互层会整体替换 selection 对象，存快照会过期 */
     getSelection: () => ISelection = () => ({
         active: { row: 0, column: 0 },
@@ -81,6 +84,7 @@ export class Renderer {
             gridExtension,
             borderExtension,
             fontExtension,
+            remoteSelectionExtension,
             selectionExtension,
         ];
     }
@@ -104,7 +108,7 @@ export class Renderer {
     }
 
     /**
-     * 标脏。调用方（模型变更 / 滚动 / 选择变化）只管喊一声，
+     * 标脏。调用方（数据变更 / 滚动 / 选择变化）只管喊一声，
      * 不需要知道画什么、怎么画。同一帧内的多次调用会被 rAF 合并。
      */
     invalidate(): void {
@@ -213,6 +217,7 @@ export class Renderer {
             styles: this.styles,
             view,
             selection: this.getSelection(),
+            remoteSelections: this.remoteSelections,
             zoom: this.zoom,
         };
 

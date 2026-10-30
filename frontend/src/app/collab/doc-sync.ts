@@ -32,7 +32,8 @@ import * as syncProtocol from 'y-protocols/sync';
 import * as awarenessProtocol from 'y-protocols/awareness';
 import * as encoding from 'lib0/encoding';
 import * as decoding from 'lib0/decoding';
-import type { ICellData, IWorkbookData, Worksheet } from '../spreadsheet/engine';
+import { getAccessToken, refreshAccessToken } from '../api/client';
+import type { ICellData, ISelection, IWorkbookData, Worksheet } from '../spreadsheet/engine';
 import type { SheetEngine } from '../spreadsheet/engine';
 import type { ObjectArray } from '../spreadsheet/engine/model/object-matrix';
 import {
@@ -61,8 +62,11 @@ export interface Peer {
     username: string;
     displayName: string;
     color: string;
-    /** 当前选中的单元格 */
-    cell?: { row: number; column: number };
+    /** 当前选区（含活动格），渲染远端选区用 */
+    selection?: {
+        active: { row: number; column: number };
+        ranges: Array<{ startRow: number; startColumn: number; endRow: number; endColumn: number }>;
+    };
 }
 
 export interface SyncStatus {
@@ -100,6 +104,35 @@ export class DocSync {
     private reconnectAttempts = 0;
     private engine: SheetEngine | null = null;
 
+    /**
+     * 本地 update → 发服务端。origin='remote' 的是远端 apply 进来的，
+     * 不再发回去，否则 A→B→A 无限回声。
+     */
+    private readonly _onUpdate = (update: Uint8Array, origin: unknown): void => {
+        if (origin === 'remote') return;
+        const encoder = encoding.createEncoder();
+        encoding.writeVarUint(encoder, MESSAGE_SYNC);
+        syncProtocol.writeUpdate(encoder, update);
+        this.send(encoding.toUint8Array(encoder));
+    };
+
+    /**
+     * 本地 awareness 变化（选区、光标、用户信息）→ 发服务端。
+     *
+     * 少了这一步，只有握手时那一次状态能到达别人；之后选区怎么变都发不出去。
+     * origin='remote' 的是远端 apply 进来的，发回去会造成回环。
+     */
+    private readonly _onAwarenessUpdate = (
+        changes: { added: number[]; updated: number[]; removed: number[] },
+        origin: unknown
+    ): void => {
+        if (origin === 'remote') return;
+        const changed = [...changes.added, ...changes.updated, ...changes.removed];
+        if (changed.length === 0) return;
+        const update = awarenessProtocol.encodeAwarenessUpdate(this.awareness, changed);
+        this.send(encodeFrame(MESSAGE_AWARENESS, update));
+    };
+
     /** sheetId → 该表的三个 Y.Map */
     private readonly sheetMaps = new Map<
         string,
@@ -114,6 +147,7 @@ export class DocSync {
     private readonly statusListeners = new Set<(status: SyncStatus) => void>();
     private readonly peerListeners = new Set<(peers: Peer[]) => void>();
     private status: SyncStatus = { status: 'connecting', notice: null };
+    private peerFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
     constructor(options: DocSyncOptions) {
         this.options = options;
@@ -123,9 +157,10 @@ export class DocSync {
             username: options.user.username,
             displayName: options.user.displayName ?? options.user.username,
         });
-        this.awareness.setLocalStateField('color', pickColor(options.user.id));
+        this.awareness.setLocalStateField('color', collabColor(options.user.id));
 
         this.awareness.on('change', () => this.emitPeers());
+        this.awareness.on('update', this._onAwarenessUpdate);
 
         // sheets 数组变化 = 增删 sheet，属于结构性改动
         this.doc.getArray<Y.Map<unknown>>(ROOT_SHEETS).observe((event) => {
@@ -139,19 +174,61 @@ export class DocSync {
             if (event.transaction.origin === LOCAL_ORIGIN) return;
             this.options.onStructureChange?.();
         });
+
+        // 本地编辑 → 产生 update → 发给服务端，服务端再广播给其他协作者
+        this.doc.on('update', this._onUpdate);
     }
 
     // ─────────────────────────── 连接 ───────────────────────────
 
+    /**
+     * 强制重连：丢掉当前连接（哪怕卡在 CONNECTING）再建一条。
+     * 「重新加载」按钮用它 —— 普通 connect() 对 CONNECTING/OPEN 是幂等的，
+     * 连接卡死时点重试会毫无反应。
+     */
+    reconnect(): void {
+        if (this.disposed) return;
+        this.reconnectAttempts = 0;
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
+        const previous = this.ws;
+        this.ws = null;
+        if (previous) {
+            // 先把回调摘掉，否则 close 会触发 onclose → 再排一次重连
+            previous.onclose = null;
+            previous.onerror = null;
+            try {
+                previous.close();
+            } catch {
+                // 已经关了就不用管
+            }
+        }
+        this.connect();
+    }
+
     connect(): void {
         if (this.disposed) return;
+        // 幂等：已在连接中或已连上时不再重复建连。
+        // React StrictMode 会双跑 effect，编排层也会重入，这里兜底防止开多条 WS。
+        if (
+            this.ws &&
+            (this.ws.readyState === WebSocket.CONNECTING ||
+                this.ws.readyState === WebSocket.OPEN)
+        ) {
+            return;
+        }
         this.setStatus({ status: 'connecting' });
 
         const base =
             this.options.url ??
             `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
+        // 每次（重）连都现取 token：access token 只有 15 分钟，
+        // 拿建连时的旧 token 重连会被服务端 4001 拒掉
+        const token = getAccessToken() ?? this.options.token;
         const url = `${base}/collab/${this.options.documentId}?access_token=${encodeURIComponent(
-            this.options.token
+            token
         )}`;
 
         const ws = new WebSocket(url);
@@ -182,9 +259,14 @@ export class DocSync {
             this.onMessage(new Uint8Array(event.data as ArrayBuffer));
         };
 
-        ws.onclose = () => {
+        ws.onclose = (event) => {
             if (this.disposed) return;
             this.setStatus({ status: 'disconnected' });
+            // 4001 = 服务端认为登录失效（多半是 access token 过期）。
+            // 先刷一次 token，下一次重连才能带上新的，否则会拿旧 token 空转
+            if (event.code === 4001) {
+                void refreshAccessToken().catch(() => undefined);
+            }
             this.scheduleReconnect();
         };
 
@@ -254,7 +336,9 @@ export class DocSync {
 
     private send(bytes: Uint8Array): void {
         if (this.ws?.readyState === WebSocket.OPEN) {
-            this.ws.send(bytes);
+            // 编码结果底层一定是 ArrayBuffer（lib0 / encodeFrame 都是 new Uint8Array），
+            // 这里收窄类型以匹配 DOM 的 send 签名
+            this.ws.send(bytes as Uint8Array<ArrayBuffer>);
         }
     }
 
@@ -480,30 +564,48 @@ export class DocSync {
         return typeof name === 'string' ? name : '';
     }
 
-    /** 把当前选中的格子推给协作者 */
-    setLocalCell(row: number, column: number): void {
-        this.awareness.setLocalStateField('cell', { row, column });
+    /** 把当前选区（含活动格）推给协作者，别人才能看到我在选哪片区域 */
+    setLocalSelection(selection: ISelection): void {
+        this.awareness.setLocalStateField('selection', {
+            active: selection.active,
+            // 只传必要的四个角，别把内部结构原样广播
+            ranges: selection.ranges.map((r) => ({
+                startRow: r.startRow,
+                startColumn: r.startColumn,
+                endRow: r.endRow,
+                endColumn: r.endColumn,
+            })),
+        });
     }
 
     getPeers(): Peer[] {
         const me = this.awareness.clientID;
+        const myUserId = this.options.user.id;
+        /** 同一个用户可能有多条 awareness（多标签页/旧连接没清干净），只保留一条 */
+        const seen = new Set<string>();
         const out: Peer[] = [];
         for (const [clientId, state] of this.awareness.getStates()) {
+            // 排除自己这个连接
             if (clientId === me) continue;
             const raw = state as {
                 user?: Partial<AwarenessUser>;
                 color?: string;
-                cell?: { row: number; column: number };
+                selection?: Peer['selection'];
             };
             const user = raw.user;
             if (!user?.id) continue;
+            // 同一账号的另一个标签页也算"自己"：否则会在自己选中的地方
+            // 再画一层同色选区，看起来像重复绘制
+            if (user.id === myUserId) continue;
+            if (seen.has(user.id)) continue;
+            seen.add(user.id);
             out.push({
                 clientId,
                 userId: user.id,
                 username: user.username ?? '',
                 displayName: user.displayName ?? user.username ?? '匿名',
                 color: raw.color ?? '#3370ff',
-                cell: raw.cell,
+                selection: normalizeSelection(raw.selection),
             });
         }
         return out;
@@ -526,22 +628,37 @@ export class DocSync {
         for (const listener of this.statusListeners) listener(next);
     }
 
+    /**
+     * peers 变化通知。选区拖拽时 awareness 一秒能变几十次，
+     * 每次都会触发 React 重渲染 + 一次重绘，所以按帧合并（~50ms 一次）。
+     */
     private emitPeers(): void {
-        const peers = this.getPeers();
-        for (const listener of this.peerListeners) listener(peers);
+        if (this.peerFlushTimer !== null) return;
+        this.peerFlushTimer = setTimeout(() => {
+            this.peerFlushTimer = null;
+            if (this.disposed) return;
+            const peers = this.getPeers();
+            for (const listener of this.peerListeners) listener(peers);
+        }, PEER_FLUSH_MS);
     }
 
     destroy(): void {
         this.disposed = true;
         if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+        if (this.peerFlushTimer !== null) {
+            clearTimeout(this.peerFlushTimer);
+            this.peerFlushTimer = null;
+        }
         this.detach();
 
-        // 标记自己下线，别人才会把头像摘掉
+        // 标记自己下线，别人才会把头像和选区摘掉。
+        // 先摘状态再解监听：这条"我下线了"的 awareness 也要发出去
         awarenessProtocol.removeAwarenessStates(
             this.awareness,
             [this.awareness.clientID],
             'unmount'
         );
+        this.awareness.off('update', this._onAwarenessUpdate);
         this.awareness.destroy();
 
         try {
@@ -550,6 +667,7 @@ export class DocSync {
             // 已经关了就不用管
         }
         this.ws = null;
+        this.doc.off('update', this._onUpdate);
         this.doc.destroy();
         this.statusListeners.clear();
         this.peerListeners.clear();
@@ -557,6 +675,9 @@ export class DocSync {
 }
 
 // ─────────────────────────── 工具 ───────────────────────────
+
+/** peers 通知的合并窗口：拖选时 awareness 一秒变几十次，没必要每次都重渲染 */
+const PEER_FLUSH_MS = 50;
 
 function encodeFrame(type: number, payload: Uint8Array): Uint8Array {
     const out = new Uint8Array(payload.byteLength + 1);
@@ -571,17 +692,46 @@ function cloneJson<T>(value: T): T {
     return JSON.parse(JSON.stringify(value)) as T;
 }
 
-/** 按 userId 稳定分配一个协作者颜色 */
-function pickColor(id: string): string {
+/** 远端选区的归一化：形状不对就当没有，别让一个坏包画花整块画布 */
+function normalizeSelection(raw: Peer['selection'] | undefined): Peer['selection'] {
+    if (!raw || !Array.isArray(raw.ranges)) return undefined;
+
+    const ranges = raw.ranges.filter(
+        (r) =>
+            r &&
+            Number.isFinite(r.startRow) &&
+            Number.isFinite(r.startColumn) &&
+            Number.isFinite(r.endRow) &&
+            Number.isFinite(r.endColumn)
+    );
+    if (ranges.length === 0) return undefined;
+
+    const active =
+        raw.active &&
+        Number.isFinite(raw.active.row) &&
+        Number.isFinite(raw.active.column)
+            ? raw.active
+            : { row: ranges[0]!.startRow, column: ranges[0]!.startColumn };
+
+    return { active, ranges };
+}
+
+/**
+ * 按 userId 稳定分配一个协作者颜色。
+ *
+ * 选区底色、顶栏头像、成员列表共用同一个颜色，所以调色板要「亮但不刺眼」：
+ * 底色以 12% 透明度铺在单元格上，描边 55%，太艳会挡住单元格内容。
+ */
+export function collabColor(id: string): string {
     const palette = [
-        '#3370ff',
-        '#00b578',
-        '#ff8800',
-        '#7f3bf5',
-        '#009fa2',
-        '#e8443a',
-        '#d4380d',
-        '#0fc6c2',
+        '#5B8FF9', // 柔蓝
+        '#5AD8A6', // 薄荷绿
+        '#F6BD16', // 暖黄
+        '#F6903D', // 杏橙
+        '#7262FD', // 紫罗兰
+        '#78D3F8', // 天蓝
+        '#9661BC', // 紫
+        '#F08BB4', // 粉
     ];
     let hash = 0;
     for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) | 0;
