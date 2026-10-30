@@ -4,6 +4,8 @@ packages:
 
 allowBuilds:
   '@parcel/watcher': true
+  '@prisma/engines': true
   esbuild: true
   protobufjs: true
+  prisma: true
   unrs-resolver: true

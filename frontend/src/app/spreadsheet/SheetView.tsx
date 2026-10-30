@@ -8,8 +8,8 @@
  * 整个渲染层（viewport / 视口裁剪）都会算错。
  */
 
-import { useRef } from 'react';
-import type { IWorkbookData } from './engine';
+import { useEffect, useRef } from 'react';
+import type { IWorkbookData, SheetEngine } from './engine';
 import { useSheetEngine } from './hooks/useSheetEngine';
 import { FormulaBar } from './ui/FormulaBar';
 import { SheetBar } from './ui/SheetBar';
@@ -18,11 +18,23 @@ import { Toolbar } from './ui/Toolbar';
 
 export interface SheetViewProps {
     snapshot: Partial<IWorkbookData>;
+    /**
+     * 引擎实例就绪时回调。协同层靠它把 Y.Doc 桥接上来。
+     * 用 ref 转发，调用方不用关心回调的引用稳定性。
+     */
+    onEngineReady?: (engine: SheetEngine | null) => void;
 }
 
-export function SheetView({ snapshot }: SheetViewProps) {
+export function SheetView({ snapshot, onEngineReady }: SheetViewProps) {
     const containerRef = useRef<HTMLDivElement>(null);
     const { engine, state } = useSheetEngine(containerRef, snapshot);
+
+    const readyRef = useRef(onEngineReady);
+    readyRef.current = onEngineReady;
+
+    useEffect(() => {
+        readyRef.current?.(engine);
+    }, [engine]);
 
     return (
         <div style={styles.root}>

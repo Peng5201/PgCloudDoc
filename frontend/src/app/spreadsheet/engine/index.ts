@@ -13,7 +13,15 @@ import { createSetRangeStylesEdit, readActiveStyle, togglePatch } from './comman
 import { loadWorkbook, saveWorkbook, createEmptyWorksheet } from './model/snapshot';
 import type { Workbook } from './model/workbook';
 import type { Worksheet } from './model/worksheet';
-import type { IRange, IStyleData, IStylePatch, IWorkbookData } from './model/types';
+import type {
+    ICellData,
+    IColumnData,
+    IRange,
+    IRowData,
+    IStyleData,
+    IStylePatch,
+    IWorkbookData,
+} from './model/types';
 import { HorizontalAlign as HA, VerticalAlign as VA, WrapStrategy as WS } from './model/types';
 import { Renderer } from './render/renderer';
 import { SheetSkeleton } from './render/skeleton';
@@ -97,6 +105,38 @@ export interface ISheetEngineOptions {
     exposeGlobal?: boolean;
 }
 
+/**
+ * 数据变更钩子 —— 协同层接入用。
+ *
+ * 只覆盖**高频**的三类改动（单元格 / 行高 / 列宽），走增量同步。
+ * 结构性改动（增删 sheet、改文档名）频率极低，由协同层直接
+ * `engine.load(物化结果)` 整体重建，不在这套钩子里。
+ *
+ * 钩子打在 ObjectMatrix/ObjectArray 的写方法上，所以命令层和交互层
+ * 一行都不用改（见 object-matrix.ts 的说明）。
+ */
+export interface IEngineChangeHooks {
+    onCellChange(
+        sheetId: string,
+        row: number,
+        column: number,
+        next: ICellData | undefined,
+        before: ICellData | undefined
+    ): void;
+    onRowChange(
+        sheetId: string,
+        index: number,
+        next: IRowData | undefined,
+        before: IRowData | undefined
+    ): void;
+    onColumnChange(
+        sheetId: string,
+        index: number,
+        next: IColumnData | undefined,
+        before: IColumnData | undefined
+    ): void;
+}
+
 const EMPTY_STATS: ISelectionStats = {
     count: 0,
     numericCount: 0,
@@ -129,6 +169,7 @@ export class SheetEngine {
 
     private _disposed = false;
     private _editText = '';
+    private _changeHooks: IEngineChangeHooks | null = null;
 
     constructor(options: ISheetEngineOptions) {
         const { container, snapshot, historyLimit = 200, exposeGlobal = true } = options;
@@ -463,6 +504,7 @@ export class SheetEngine {
             columnCount: this._ref.worksheet.columnCount,
         });
         this.workbook.addSheet(sheet);
+        this._wireWorksheet(sheet);
         this.setActiveSheet(id);
         this._emit('content-change');
         return id;
@@ -494,6 +536,51 @@ export class SheetEngine {
         return ok;
     }
 
+    // ─────────────────────────── 协同钩子 ───────────────────────────
+
+    /**
+     * 接上协同层。调用后所有本地数据变更都会回调出去。
+     * 一个引擎只接一个协同层（重复调用会覆盖）。
+     */
+    attachChangeHooks(hooks: IEngineChangeHooks | null): void {
+        this._changeHooks = hooks;
+        for (const sheet of this.workbook.getSheets()) {
+            this._wireWorksheet(sheet);
+        }
+    }
+
+    /** 给某张表的三个矩阵挂上回调。新加的表也要走一遍 */
+    private _wireWorksheet(worksheet: Worksheet): void {
+        const hooks = this._changeHooks;
+        const sheetId = worksheet.id;
+
+        worksheet.cellData.onChange = hooks
+            ? (row, column, next, before) =>
+                  hooks.onCellChange(sheetId, row, column, next, before)
+            : null;
+        worksheet.rowData.onChange = hooks
+            ? (index, next, before) => hooks.onRowChange(sheetId, index, next, before)
+            : null;
+        worksheet.columnData.onChange = hooks
+            ? (index, next, before) => hooks.onColumnChange(sheetId, index, next, before)
+            : null;
+    }
+
+    /**
+     * 远端改动已写进模型，通知 UI 刷新。
+     *
+     * 协同层收到别人更新后用 `applySilently` 写进矩阵（不触发 onChange 防回声），
+     * 写完调这里把骨架缓存作废、重绘、发 content-change 让 React 重渲染。
+     */
+    notifyExternalChange(): void {
+        if (this._disposed) return;
+        for (const skeleton of this._skeletons.values()) {
+            skeleton.invalidate();
+        }
+        this.renderer.invalidate();
+        this._emit('content-change');
+    }
+
     // ─────────────────────────── 序列化 ───────────────────────────
 
     toJSON(): IWorkbookData {
@@ -510,6 +597,10 @@ export class SheetEngine {
         this._skeletons.clear();
         // 撤销栈里存的是对旧 worksheet 的引用，留着会把数据写回旧对象
         this.history.clear();
+        // 新的 worksheet 对象要重新挂协同钩子
+        for (const sheet of this._workbook.getSheets()) {
+            this._wireWorksheet(sheet);
+        }
 
         const worksheet = this._workbook.getActiveSheet();
         if (!worksheet) return;

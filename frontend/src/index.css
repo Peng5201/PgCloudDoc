@@ -1,9 +1,18 @@
+/**
+ * 全局样式。
+ *
+ * 页面各自用 antd 组件 + 内联布局，这里只管「铺满视口」这一件事 ——
+ * 表格画布必须拿到确定高度，否则渲染层的视口裁剪会算错。
+ */
+
 :root {
   font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   color-scheme: light dark;
 }
 
-html, body, #root {
+html,
+body,
+#root {
   margin: 0;
   padding: 0;
   width: 100%;
@@ -13,13 +22,17 @@ html, body, #root {
 body {
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
-.app {
-  flex: 1;
+/* 路由挂载点：让每一页都能 height:100% 撑满 */
+#root {
   display: flex;
   flex-direction: column;
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
+  min-height: 0;
+}
+
+#root > * {
+  flex: 1;
+  min-height: 0;
 }

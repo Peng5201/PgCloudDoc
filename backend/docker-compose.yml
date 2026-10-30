@@ -1,0 +1,64 @@
+# PgCloudDoc 服务端依赖基础设施。
+#
+# 三个服务：PostgreSQL(数据) / Redis(缓存+限流+协同广播) / Kafka(事件总线)。
+# 全部单节点、KRaft 无 ZooKeeper —— 本地开发用，生产请换成托管集群。
+
+name: pgclouddoc
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: pgclouddoc-postgres
+    restart: unless-stopped
+    ports:
+      - '${PG_PORT:-5432}:5432'
+    environment:
+      POSTGRES_USER: ${PG_USER:-pgclouddoc}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-pgclouddoc}
+      POSTGRES_DB: ${PG_DB:-pgclouddoc}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: pgclouddoc-redis
+    restart: unless-stopped
+    ports:
+      - '${REDIS_PORT:-6379}:6379'
+    # AOF 每秒 fsync：缓存可以丢，但 token 黑名单/限流计数别一重启就全没
+    command: ['redis-server', '--appendonly', 'yes', '--appendfsync', 'everysec']
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  kafka:
+    image: apache/kafka:3.9.0
+    container_name: pgclouddoc-kafka
+    restart: unless-stopped
+    ports:
+      - '${KAFKA_PORT:-9092}:9092'
+    volumes:
+      # 配置用文件挂载：镜像的 KAFKA_* 环境变量映射对 advertised.listeners 不生效
+      - ./kafka/server.properties:/opt/kafka/config/kraft/server.properties:ro
+      - kafkadata:/var/lib/kafka/data
+    environment:
+      KAFKA_HEAP_OPTS: '-Xmx512M -Xms256M'
+    healthcheck:
+      test: ['CMD-SHELL', '/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1']
+      interval: 10s
+      timeout: 10s
+      retries: 20
+
+volumes:
+  pgdata:
+  redisdata:
+  kafkadata:

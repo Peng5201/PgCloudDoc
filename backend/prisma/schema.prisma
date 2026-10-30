@@ -1,0 +1,220 @@
+// PgCloudDoc 数据模型
+//
+// 约定：
+//   1. 表名/列名一律 snake_case（@@map/@map），因为 schema 里还会写裸 SQL
+//      （存储过程、视图、compaction），让 SQL 不用到处加引号转义
+//   2. 所有 id 用 uuid（应用侧 / DB 侧均可生成），雪花 id 留给将来分库分表
+//   3. 软删除用 deletedAt + status，不用物理删 —— 云文档不能一点就没了
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/infra/prisma/generated"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ────────────────────────────── 枚举 ──────────────────────────────
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  DELETED
+}
+
+enum DocumentStatus {
+  ACTIVE
+  ARCHIVED
+  DELETED
+}
+
+enum MemberRole {
+  OWNER
+  EDITOR
+  VIEWER
+}
+
+// ────────────────────────────── 用户 ──────────────────────────────
+
+model User {
+  id           String     @id @default(uuid()) @map("id")
+  email        String     @unique @map("email")
+  username     String     @unique @map("username")
+  /// argon2id 哈希。OAuth/OIDC 用户没有密码，为 null
+  passwordHash String?    @map("password_hash")
+  displayName  String?    @map("display_name")
+  avatarUrl    String?    @map("avatar_url")
+  status       UserStatus @default(ACTIVE) @map("status")
+  /// JWT 里带上它，改密码/封号时自增即可让所有存量 access token 立刻失效
+  tokenVersion Int        @default(0) @map("token_version")
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+
+  identities    AuthIdentity[]
+  refreshTokens RefreshToken[]
+  documents     Document[]
+  memberships   DocumentMember[]
+  auditLogs     AuditLog[]
+
+  @@map("users")
+}
+
+/// OAuth2 / OIDC 第三方身份绑定。一个用户可绑多个 provider
+model AuthIdentity {
+  id             String   @id @default(uuid()) @map("id")
+  provider       String   @map("provider")
+  providerUserId String   @map("provider_user_id")
+  userId         String   @map("user_id")
+  email          String?  @map("email")
+  /// provider 原始返回，审计用；不参与业务
+  raw            Json?    @map("raw")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerUserId])
+  @@index([userId])
+  @@map("auth_identities")
+}
+
+/// 刷新令牌。只存 sha256 哈希，明文只在 cookie 里出现一次
+model RefreshToken {
+  id String @id @default(uuid()) @map("id")
+  /// 同一次「登录」产生的一串轮换令牌同属一族，重放检测按族吊销
+  familyId     String    @map("family_id")
+  userId       String    @map("user_id")
+  tokenHash    String    @unique @map("token_hash")
+  expiresAt    DateTime  @map("expires_at")
+  revokedAt    DateTime? @map("revoked_at")
+  /// 轮换后指向下一个令牌，链式可追溯
+  replacedById String?   @map("replaced_by_id")
+  userAgent    String?   @map("user_agent")
+  ip           String?   @map("ip")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+  @@index([familyId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+// ────────────────────────────── 文档 ──────────────────────────────
+
+model Document {
+  id          String         @id @default(uuid()) @map("id")
+  ownerId     String         @map("owner_id")
+  name        String         @map("name")
+  description String?        @map("description")
+  status      DocumentStatus @default(ACTIVE) @map("status")
+  /// materialize 自 Y.Doc 的 IWorkbookData JSON 快照，二进制存减少体积
+  snapshot        Bytes?   @map("snapshot")
+  snapshotVersion Int      @default(0) @map("snapshot_version")
+  /// snapshot 的 sha256，做 ETag / 协商缓存
+  contentHash     String?  @map("content_hash")
+  docSize         Int      @default(0) @map("doc_size")
+  cellCount       Int      @default(0) @map("cell_count")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  deletedAt       DateTime? @map("deleted_at")
+
+  owner    User             @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  members  DocumentMember[]
+  updates  DocumentUpdate[]
+  versions DocumentVersion[]
+
+  /// 列表页主查询路径：按用户 + 未删除 + 最近更新排序
+  @@index([ownerId, status, updatedAt(sort: Desc)])
+  @@index([updatedAt])
+  @@map("documents")
+}
+
+/// 协作者。分享/权限功能预留，本轮只有 OWNER 参与
+model DocumentMember {
+  id         String     @id @default(uuid()) @map("id")
+  documentId String     @map("document_id")
+  userId     String     @map("user_id")
+  role       MemberRole @default(VIEWER) @map("role")
+  createdAt  DateTime   @default(now()) @map("created_at")
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, userId])
+  @@index([userId])
+  @@map("document_members")
+}
+
+/// Yjs update 追加日志。append-only，定期 compaction 合并
+model DocumentUpdate {
+  id         BigInt   @id @default(autoincrement()) @map("id")
+  documentId String   @map("document_id")
+  /// 文档内单调递增序号，重建时按它顺序 applyUpdate
+  seq        Int      @map("seq")
+  payload    Bytes    @map("payload")
+  actorId    String?  @map("actor_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, seq])
+  @@index([documentId, seq])
+  @@map("document_updates")
+}
+
+/// 存档版本。「存档」的最终落点，可回滚
+model DocumentVersion {
+  id         String   @id @default(uuid()) @map("id")
+  documentId String   @map("document_id")
+  versionNo  Int      @map("version_no")
+  name       String?  @map("name")
+  remark     String?  @map("remark")
+  snapshot   Bytes    @map("snapshot")
+  sizeBytes  Int      @default(0) @map("size_bytes")
+  createdBy  String?  @map("created_by")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, versionNo])
+  @@index([documentId, createdAt(sort: Desc)])
+  @@map("document_versions")
+}
+
+// ────────────────────────────── 平台 ──────────────────────────────
+
+model AuditLog {
+  id           String   @id @default(uuid()) @map("id")
+  userId       String?  @map("user_id")
+  action       String   @map("action")
+  resourceType String?  @map("resource_type")
+  resourceId   String?  @map("resource_id")
+  ip           String?  @map("ip")
+  userAgent    String?  @map("user_agent")
+  metadata     Json?    @map("metadata")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  /// 用户注销后审计记录要留着，所以是 SetNull 而不是 Cascade
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([resourceType, resourceId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+/// Kafka 消费幂等表：(topic, partition, msgOffset) 只处理一次
+model ProcessedEvent {
+  id          String   @id @default(uuid()) @map("id")
+  topic       String   @map("topic")
+  partition   Int      @map("partition")
+  msgOffset   BigInt   @map("msg_offset")
+  processedAt DateTime @default(now()) @map("processed_at")
+
+  @@unique([topic, partition, msgOffset])
+  @@index([processedAt])
+  @@map("processed_events")
+}
