@@ -6,6 +6,9 @@
     "dev": "pnpm -r --parallel dev",
     "dev:frontend": "pnpm --filter frontend dev",
     "dev:backend": "pnpm --filter backend dev",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "deploy:prod": "node deploy/deploy.mjs",
+    "deploy:down": "node deploy/deploy.mjs --down",
+    "deploy:logs": "node deploy/deploy.mjs --logs"
   }
 }

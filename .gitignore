@@ -19,6 +19,10 @@ yarn-error.log*
 .env
 .env.*
 !.env.example
+# 生产部署用的真实密钥（deploy.mjs 自动生成）
+deploy/.env.production
+# …但模板要提交
+!deploy/.env.production.example
 
 # Test coverage
 coverage/
@@ -32,8 +36,8 @@ tmp/
 # Editor / IDE
 .idea/
 *.sublime-workspace
+# .vscode/ is personal; only shared project config is tracked.
 .vscode/*
-!.vscode/settings.json
 !.vscode/tasks.json
 !.vscode/launch.json
 !.vscode/extensions.json

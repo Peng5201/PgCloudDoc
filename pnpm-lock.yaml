@@ -55,6 +55,9 @@ importers:
       cookie-parser:
         specifier: ^1.4.7
         version: 1.4.7
+      dotenv:
+        specifier: ^18.0.9
+        version: 18.0.9
       helmet:
         specifier: ^8.3.0
         version: 8.3.0
@@ -137,9 +140,6 @@ importers:
       '@types/ws':
         specifier: ^8.18.2
         version: 8.18.2
-      dotenv:
-        specifier: ^18.0.9
-        version: 18.0.9
       jest:
         specifier: ^30.0.0
         version: 30.5.2(@types/node@24.19.2)(supports-color@8.1.1)(ts-node@10.9.2(@types/node@24.19.2)(typescript@6.0.3))

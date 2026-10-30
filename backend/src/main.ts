@@ -36,6 +36,14 @@ async function bootstrap(): Promise<void> {
 
     const config = app.get(AppConfigService);
 
+    // ── 反向代理 ──
+    // 生产环境 nginx 在前面，必须信任一跳代理，否则 req.ip 全是 nginx 容器的地址，
+    // 限流会把所有用户算成同一个人（第一个撞上限的人拖累所有人），审计日志也会失真。
+    // 只在显式配置时开启 —— 直连部署信任 X-Forwarded-For 等于允许客户端伪造 IP。
+    if (config.http.trustProxy > 0) {
+        app.set('trust proxy', config.http.trustProxy);
+    }
+
     // ── 日志 ──
     app.useLogger(app.get(PinoLogger));
 

@@ -1,0 +1,229 @@
+# PgCloudDoc 生产部署（单机 Docker Compose）。
+#
+#   node deploy/deploy.mjs          # 一键部署（推荐，用法见根 README「生产部署」）
+#   docker compose -f deploy/docker-compose.prod.yml up -d   # 手工等价操作（不含迁移）
+#
+# 网络安全边界：
+#   只有 web 对外发布端口；backend / postgres / redis / kafka 都只挂在内部网络。
+#   kafka 的 EXTERNAL listener 绑到 127.0.0.1，只供宿主机调试。
+#
+# project name 刻意和开发环境（backend/docker-compose.yml 的 pgclouddoc）区分开，
+# 否则两边会共用同一个 pgdata 卷，`infra:up` 和 `deploy` 互相踩。
+
+name: pgclouddoc-prod
+
+# ── 公共片段 ──────────────────────────────────────────────
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: '10m'
+    max-file: '3'
+
+# 镜像构建参数。国内网络访问 npm 官方源慢时，在 deploy/.env.production 里
+# 加一行 NPM_REGISTRY=https://registry.npmmirror.com 即可。
+# NODE_IMAGE / NGINX_IMAGE 同理 —— 镜像加速器拉不动基础镜像时，
+# 换成能访问的 registry 前缀，例如 docker.m.daocloud.io/library/node:22-bookworm-slim
+x-backend-build-args: &backend-build-args
+  NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
+  NODE_IMAGE: ${NODE_IMAGE:-node:22-bookworm-slim}
+  # 构建 migrator/backend 时要 apt 装 openssl；官方 deb 源不稳时换成国内镜像
+  APT_MIRROR: ${APT_MIRROR:-}
+
+x-web-build-args: &web-build-args
+  NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
+  NODE_IMAGE: ${NODE_IMAGE:-node:22-bookworm-slim}
+  NGINX_IMAGE: ${NGINX_IMAGE:-nginx:1.27-alpine}
+
+# 后端进程的统一配置。容器名即主机名，所以 DATABASE_URL / REDIS_HOST / KAFKA_BROKERS
+# 全部指向 compose 服务名，而不是 localhost
+x-backend-env: &backend-env
+  NODE_ENV: production
+  PORT: '3000'
+
+  DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
+  PG_HOST: postgres
+  PG_PORT: '5432'
+  PG_USER: ${POSTGRES_USER}
+  PG_PASSWORD: ${POSTGRES_PASSWORD}
+  PG_DB: ${POSTGRES_DB}
+
+  REDIS_HOST: redis
+  REDIS_PORT: '6379'
+  REDIS_PASSWORD: ${REDIS_PASSWORD}
+
+  KAFKA_BROKERS: kafka:9092
+
+  JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+  JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+  COOKIE_SECURE: ${COOKIE_SECURE:-false}
+  COOKIE_SAMESITE: lax
+
+  # 同源部署下这个值主要用于放行浏览器的同源 Origin 头
+  CORS_ORIGINS: ${PUBLIC_ORIGIN}
+
+  # nginx 在前面，信任一跳代理，否则限流和审计里的 IP 全是 nginx 容器地址
+  TRUST_PROXY: '1'
+
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  LOG_PRETTY: 'false'
+
+  OAUTH_GOOGLE_CLIENT_ID: ${OAUTH_GOOGLE_CLIENT_ID:-}
+  OAUTH_GOOGLE_CLIENT_SECRET: ${OAUTH_GOOGLE_CLIENT_SECRET:-}
+  OAUTH_GOOGLE_REDIRECT_URI: ${OAUTH_GOOGLE_REDIRECT_URI:-}
+
+services:
+  # ── 数据层 ──────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # 并发写多时默认 64MB 的 /dev/shm 容易成为瓶颈
+    shm_size: 256mb
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    networks: [data]
+    logging: *default-logging
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # AOF 每秒 fsync：限流计数、token 黑名单、分布式锁不能一重启就全丢。
+    # maxmemory-policy=noeviction：这些 key 被静默淘汰会导致锁失效，宁可写入报错。
+    command:
+      - redis-server
+      - --appendonly
+      - 'yes'
+      - --appendfsync
+      - everysec
+      - --requirepass
+      - ${REDIS_PASSWORD}
+      - --maxmemory-policy
+      - noeviction
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD-SHELL', 'redis-cli --no-auth-warning -a "$$REDIS_PASSWORD" ping | grep -q PONG']
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    networks: [data]
+    logging: *default-logging
+
+  kafka:
+    image: apache/kafka:3.9.0
+    restart: unless-stopped
+    volumes:
+      # 配置文件挂载而不是 KAFKA_* 环境变量：镜像的属性映射对 advertised.listeners 不生效
+      - ./kafka/server.properties:/opt/kafka/config/kraft/server.properties:ro
+      - kafkadata:/var/lib/kafka/data
+    environment:
+      KAFKA_HEAP_OPTS: '-Xmx512M -Xms256M'
+    ports:
+      # 只绑回环，宿主机调试用；外部网络访问不到
+      - '127.0.0.1:${KAFKA_EXTERNAL_PORT:-9094}:9094'
+    healthcheck:
+      test:
+        ['CMD-SHELL', '/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1']
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
+    networks: [data]
+    logging: *default-logging
+
+  # ── 一次性任务：数据库迁移 ──────────────────────────────
+  # 放在 tools profile 里，普通的 up 不会顺带跑它；
+  # deploy.mjs 用 `--profile tools run --rm migrate` 显式执行，保证每次发版都应用新迁移。
+  migrate:
+    profiles: [tools]
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+      target: migrator
+      args: *backend-build-args
+    image: pgclouddoc-backend-migrator:${IMAGE_TAG:-latest}
+    environment: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: 'no'
+    networks: [data]
+    logging: *default-logging
+
+  # ── 应用层 ──────────────────────────────────────────────
+  backend:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+      target: runtime
+      args: *backend-build-args
+    image: pgclouddoc-backend:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    init: true
+    environment: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    # 等在途请求和 WebSocket 收尾，不给客户端制造 502
+    stop_grace_period: 30s
+    healthcheck:
+      # readiness：PG 挂了就返回 503，web 不会把流量转进来
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks: [data, web]
+    logging: *default-logging
+
+  web:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile
+      args: *web-build-args
+    image: pgclouddoc-web:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      - '${WEB_PORT:-80}:80'
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1/healthz >/dev/null 2>&1']
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    networks: [web]
+    logging: *default-logging
+
+volumes:
+  pgdata:
+  redisdata:
+  kafkadata:
+
+networks:
+  # 对外：只有 web 和 backend 在
+  web:
+  # 内部：数据层 + backend
+  data:

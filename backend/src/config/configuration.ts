@@ -85,6 +85,7 @@ export function buildConfig() {
 
         http: {
             corsOrigins: env.CORS_ORIGINS,
+            trustProxy: env.TRUST_PROXY,
             jsonLimit: env.BODY_JSON_LIMIT,
             rawLimit: env.BODY_RAW_LIMIT,
             compressionThreshold: env.COMPRESSION_THRESHOLD,

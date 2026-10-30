@@ -1,0 +1,23 @@
+# 构建上下文是整个仓库根目录（pnpm workspace），
+# 这些路径进不了镜像，能显著缩短构建时间、避免把本地机密打进去。
+
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+
+.git
+.gitignore
+.vscode
+.idea
+
+# 本地/生产环境变量一律不进镜像（生产由 compose 注入）
+**/.env
+**/.env.*
+!**/.env.example
+deploy/.env.production
+
+# 测试与产物
+**/coverage
+**/.nyc_output
+**/test
+*.log

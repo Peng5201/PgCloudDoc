@@ -85,6 +85,9 @@ export const envSchema = z.object({
 
     // ── HTTP ──
     CORS_ORIGINS: csv(['http://localhost:5173']),
+    // 前面有几层反向代理可信（nginx 部署填 1，直连填 0）。
+    // 不设置的话 req.ip 会是代理的地址，限流和审计会全部算到同一个 IP 上。
+    TRUST_PROXY: int(0, 0),
     BODY_JSON_LIMIT: z.string().optional().default('1mb'),
     BODY_RAW_LIMIT: z.string().optional().default('8mb'),
     COMPRESSION_THRESHOLD: int(1024, 0),
