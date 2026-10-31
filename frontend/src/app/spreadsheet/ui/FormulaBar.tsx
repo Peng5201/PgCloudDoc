@@ -22,9 +22,11 @@ import {
 interface FormulaBarProps {
     engine: SheetEngine | null;
     state: ISheetState | null;
+    /** 只读模式：公式栏只能看，不能编辑 */
+    readOnly?: boolean;
 }
 
-export function FormulaBar({ engine, state }: FormulaBarProps) {
+export function FormulaBar({ engine, state, readOnly = false }: FormulaBarProps) {
     const [draft, setDraft] = useState('');
     const [name, setName] = useState('');
     const focusedRef = useRef(false);
@@ -78,6 +80,7 @@ export function FormulaBar({ engine, state }: FormulaBarProps) {
                 size="small"
                 style={styles.nameBox}
                 value={name}
+                disabled={readOnly}
                 onChange={(event) => setName(event.target.value)}
                 onPressEnter={jumpTo}
                 onBlur={jumpTo}
@@ -90,6 +93,7 @@ export function FormulaBar({ engine, state }: FormulaBarProps) {
                     size="small"
                     style={styles.fx}
                     tabIndex={-1}
+                    disabled={readOnly}
                     onClick={() => engine?.beginEdit(state?.selection.active.row ?? 0, state?.selection.active.column ?? 0, undefined, false)}
                 >
                     fx
@@ -100,6 +104,7 @@ export function FormulaBar({ engine, state }: FormulaBarProps) {
                     value={draft}
                     placeholder="输入内容或公式"
                     aria-label="公式栏"
+                    disabled={readOnly}
                     onChange={(event) => {
                         setDraft(event.target.value);
                         engine?.syncFromFormulaBar(event.target.value);
@@ -114,7 +119,7 @@ export function FormulaBar({ engine, state }: FormulaBarProps) {
                     }}
                 />
                 <Tooltip title="确认">
-                    <Button type="text" size="small" onClick={commit} tabIndex={-1}>
+                    <Button type="text" size="small" disabled={readOnly} onClick={commit} tabIndex={-1}>
                         ✓
                     </Button>
                 </Tooltip>
@@ -122,6 +127,7 @@ export function FormulaBar({ engine, state }: FormulaBarProps) {
                     <Button
                         type="text"
                         size="small"
+                        disabled={readOnly}
                         tabIndex={-1}
                         onClick={() => {
                             engine?.cancelEdit();

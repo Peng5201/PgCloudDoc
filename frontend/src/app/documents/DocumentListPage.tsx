@@ -5,7 +5,7 @@
  * 文档按更新时间倒序，编辑中不断插入新文档时，offset 分页会漏项或重复。
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
     App,
@@ -21,6 +21,7 @@ import {
 } from 'antd';
 import {
     FileAddOutlined,
+    FileExcelOutlined,
     FolderOpenOutlined,
     MoreOutlined,
     SearchOutlined,
@@ -28,6 +29,7 @@ import {
 import { AppLayout } from '../../shared/AppLayout';
 import { documentsApi, type DocumentSummary } from '../api/documents';
 import { ApiError } from '../api/client';
+import { useAuth } from '../auth/AuthContext';
 
 const { Text, Paragraph } = Typography;
 
@@ -36,6 +38,7 @@ const PAGE_SIZE = 20;
 export function DocumentListPage() {
     const navigate = useNavigate();
     const { message: messageApi, modal } = App.useApp();
+    const { user } = useAuth();
 
     const [items, setItems] = useState<DocumentSummary[]>([]);
     const [cursor, setCursor] = useState<string | null>(null);
@@ -44,6 +47,9 @@ export function DocumentListPage() {
     const [keyword, setKeyword] = useState('');
     const [creating, setCreating] = useState(false);
     const [newName, setNewName] = useState('');
+    const [importing, setImporting] = useState(false);
+    /** 导入 Excel 用的隐藏文件选择器 */
+    const importInputRef = useRef<HTMLInputElement>(null);
 
     const load = useCallback(
         async (options: { cursor?: string | null; replace?: boolean }) => {
@@ -90,7 +96,28 @@ export function DocumentListPage() {
         }
     }
 
+    /** 导入 xlsx —— 服务端解析并建新文档，这里只负责上传和跳转 */
+    async function handleImportXlsx(file: File) {
+        if (importing) return;
+        setImporting(true);
+        try {
+            const created = await documentsApi.importXlsx(file);
+            messageApi.success('导入成功');
+            await load({ cursor: null, replace: true });
+            navigate(`/docs/${created.id}`);
+        } catch (err) {
+            messageApi.error(err instanceof ApiError ? err.message : '导入失败');
+        } finally {
+            setImporting(false);
+        }
+    }
+
     async function handleRename(doc: DocumentSummary) {
+        // 文件名只有创建者能改（菜单里也已禁用，这里兜底）
+        if (doc.ownerId !== user?.id) {
+            messageApi.error('只有创建者可以修改文件名');
+            return;
+        }
         let value = doc.name;
         modal.confirm({
             title: '重命名文档',
@@ -152,13 +179,34 @@ export function DocumentListPage() {
                         onChange={(e) => setKeyword(e.target.value)}
                         style={{ width: 280 }}
                     />
-                    <Button
-                        type="primary"
-                        icon={<FileAddOutlined />}
-                        onClick={() => setCreating(true)}
-                    >
-                        新建文档
-                    </Button>
+                    <Space>
+                        <input
+                            ref={importInputRef}
+                            type="file"
+                            accept=".xlsx,.xlsm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12"
+                            style={{ display: 'none' }}
+                            onChange={(event) => {
+                                const file = event.target.files?.[0];
+                                // 清空 value，否则连续选同一个文件不会再触发 change
+                                event.target.value = '';
+                                if (file) void handleImportXlsx(file);
+                            }}
+                        />
+                        <Button
+                            icon={<FileExcelOutlined />}
+                            loading={importing}
+                            onClick={() => importInputRef.current?.click()}
+                        >
+                            导入 Excel
+                        </Button>
+                        <Button
+                            type="primary"
+                            icon={<FileAddOutlined />}
+                            onClick={() => setCreating(true)}
+                        >
+                            新建文档
+                        </Button>
+                    </Space>
                 </div>
 
                 <List
@@ -190,7 +238,11 @@ export function DocumentListPage() {
                                     menu={{
                                         items: [
                                             { key: 'open', label: '打开', icon: <FolderOpenOutlined /> },
-                                            { key: 'rename', label: '重命名' },
+                                            {
+                                                key: 'rename',
+                                                label: '重命名',
+                                                disabled: doc.ownerId !== user?.id,
+                                            },
                                             { key: 'duplicate', label: '创建副本' },
                                             { type: 'divider' },
                                             { key: 'delete', label: '删除', danger: true },
@@ -214,6 +266,10 @@ export function DocumentListPage() {
                                         style={styles.title}
                                     >
                                         {doc.name}
+                                        {/* 文档统一以 xlsx 导出，列表里把后缀露出来 */}
+                                        <Text type="secondary" style={styles.ext}>
+                                            .xlsx
+                                        </Text>
                                     </a>
                                 }
                                 description={
@@ -295,6 +351,12 @@ const styles = {
     },
     title: {
         fontSize: 15,
+    },
+    ext: {
+        fontSize: 13,
+        marginLeft: 2,
+        // 不参与点击区域的强调，只作为后缀提示
+        cursor: 'inherit',
     },
     more: {
         textAlign: 'center' as const,

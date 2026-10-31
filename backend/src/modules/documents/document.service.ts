@@ -22,7 +22,15 @@ import { CacheService } from '../../infra/redis/cache.service';
 import { KafkaService } from '../../infra/kafka/kafka.service';
 import { KafkaTopic } from '../../infra/kafka/topics';
 import type { DocSnapshotRequestedEvent } from '../../infra/kafka/events';
-import { AppError } from '../../common/errors/app-error';
+import { AppError, ErrorCode } from '../../common/errors/app-error';
+import {
+    readWorkbook,
+    writeWorkbook,
+    defaultFormat,
+    extensionOf,
+    UnsupportedFormatError,
+    CellLimitExceededError,
+} from './formats';
 import { PageResult, toPage } from '../../common/dto/pagination.dto';
 import {
     AccessRequestDto,
@@ -44,6 +52,9 @@ export interface SnapshotPayload {
 
 /** 操作所需的权限级别：read=任何人可读 / write=owner+编辑 / own=仅 owner */
 type AccessLevel = 'read' | 'write' | 'own';
+
+/** 导入单元格上限：超过直接拒绝，提示拆分（更大体量应走异步队列） */
+const MAX_IMPORT_CELLS = 2_000_000;
 
 @Injectable()
 export class DocumentService {
@@ -146,7 +157,12 @@ export class DocumentService {
         documentId: string,
         dto: UpdateDocumentDto
     ): Promise<DocumentDetail> {
-        await this.getAccessibleRow(userId, documentId, 'write');
+        const { role } = await this.getAccessibleRow(userId, documentId, 'write');
+
+        // 文件名只有创建者能改；描述 / 状态仍按「编辑」权限放行
+        if (dto.name !== undefined && role !== MemberRole.OWNER) {
+            throw AppError.forbidden('只有创建者可以修改文档名');
+        }
 
         await this.documents.update(documentId, {
             name: dto.name,
@@ -199,6 +215,82 @@ export class DocumentService {
 
         await this.archive(newId, userId, '复制生成');
         return this.detail(userId, newId);
+    }
+
+    // ─────────────────────────── 导入 / 导出 ───────────────────────────
+
+    /**
+     * 从工作簿文件导入成一份**新文档**。
+     *
+     * 解析失败不会影响任何现有文档 —— 这是「导入 = 新建」相对「覆盖」的核心优势。
+     * 格式由 `formats/` 注册表按扩展名分发（目前支持 xlsx）。
+     */
+    async importDocument(
+        ownerId: string,
+        file: { buffer: Buffer; originalname: string }
+    ): Promise<DocumentDetail> {
+        const name = fileBaseName(file.originalname);
+
+        let parsed;
+        try {
+            parsed = await readWorkbook(file.buffer, file.originalname, {
+                name,
+                maxCells: MAX_IMPORT_CELLS,
+            });
+        } catch (err) {
+            if (err instanceof CellLimitExceededError) {
+                throw new AppError(ErrorCode.PAYLOAD_TOO_LARGE, err.message);
+            }
+            if (err instanceof UnsupportedFormatError) {
+                throw AppError.badRequest('不支持的文件格式');
+            }
+            this.logger.warn(`解析工作簿失败（${file.originalname}）：${String(err)}`);
+            throw AppError.badRequest('无法解析该文件，请确认格式正确');
+        }
+
+        if (parsed.warnings.length > 0) {
+            this.logger.log(`导入 ${file.originalname} 的降级项：${parsed.warnings.join('；')}`);
+        }
+
+        const id = randomUUID();
+        const firstSheet = parsed.workbook.sheets[parsed.workbook.sheetOrder[0]];
+        await this.documents.create({
+            id,
+            ownerId,
+            name,
+            description: null,
+            rowCount: firstSheet?.rowCount ?? 200,
+            columnCount: firstSheet?.columnCount ?? 26,
+            cellCount: parsed.cellCount,
+        });
+
+        // 把解析结果灌进 Y.Doc —— 和 duplicate 用的是同一套写入逻辑
+        const { doc } = await this.ydocStore.load(id);
+        applySnapshot(doc, { ...parsed.workbook, id, name });
+
+        // 从第一刻起版本历史就是完整的
+        await this.archive(id, ownerId, '导入文件');
+        return this.detail(ownerId, id);
+    }
+
+    /**
+     * 导出为工作簿文件（默认 xlsx）。
+     *
+     * 以服务端 Y.Doc 为准 —— 客户端手里的数据可能落后于别人的实时编辑。
+     */
+    async exportDocument(
+        userId: string,
+        documentId: string
+    ): Promise<{ buffer: Buffer; filename: string; contentType: string }> {
+        const { row } = await this.getAccessibleRow(userId, documentId, 'read');
+        const { doc } = await this.ydocStore.load(documentId);
+        const workbook = materialize(doc, documentId);
+        const buffer = await writeWorkbook(workbook);
+        return {
+            buffer,
+            filename: `${safeFilename(row.name || '工作簿')}${defaultFormat.extensions[0]}`,
+            contentType: defaultFormat.contentType,
+        };
     }
 
     // ─────────────────────────── 快照 ───────────────────────────
@@ -611,4 +703,22 @@ function decodeCursor(
         // 游标坏了就当第一页，不要把用户挡在门外
         return undefined;
     }
+}
+
+/** `/path/报表.xlsx` → `报表`（去掉已识别的扩展名） */
+function fileBaseName(originalname: string): string {
+    const base = originalname.split(/[\\/]/).pop() ?? originalname;
+    const ext = extensionOf(base);
+    const name = (ext ? base.slice(0, base.length - ext.length) : base).trim();
+    return name || '导入的文档';
+}
+
+/** 去掉文件名里的非法字符（Windows / POSIX 都照顾到） */
+function safeFilename(name: string): string {
+    return (
+        name
+            .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')
+            .trim()
+            .slice(0, 100) || '工作簿'
+    );
 }

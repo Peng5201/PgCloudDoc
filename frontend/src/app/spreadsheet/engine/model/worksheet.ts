@@ -19,6 +19,7 @@ import type {
     ObjectMatrixPrimitive,
 } from './types';
 import { normalizeRange } from './types';
+import { formatCellValue } from './value-format';
 
 export const DEFAULT_ROW_HEIGHT = 24;
 export const DEFAULT_COLUMN_WIDTH = 88;
@@ -197,11 +198,21 @@ export class Worksheet {
         };
     }
 
-    /** 单元格里显示的文本（公式优先显示公式原文，与 Excel 的编辑栏一致） */
-    cellText(cell: ICellData | undefined): string {
+    /**
+     * 单元格里显示的文本。
+     *
+     * 公式优先显示公式原文（与 Excel 编辑栏一致）；数字有格式串时按格式渲染
+     * （导入的日期/百分比/千分位全靠这一条），否则退化为 `String(v)`。
+     */
+    cellText(cell: ICellData | undefined, style?: IStyleData): string {
         if (!cell) return '';
         if (cell.f != null) return cell.f;
         if (cell.v == null) return '';
+        if (typeof cell.v === 'boolean') return cell.v ? 'TRUE' : 'FALSE';
+        const pattern = style?.n?.pattern;
+        if (pattern && typeof cell.v === 'number') {
+            return formatCellValue({ value: cell.v, pattern });
+        }
         return String(cell.v);
     }
 

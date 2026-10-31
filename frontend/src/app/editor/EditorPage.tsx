@@ -29,6 +29,7 @@ import {
 import {
     CloudServerOutlined,
     DownloadOutlined,
+    FileExcelOutlined,
     FrownOutlined,
     HistoryOutlined,
     LoadingOutlined,
@@ -61,6 +62,7 @@ export function EditorPage() {
     const [loadError, setLoadError] = useState<string | null>(null);
     const [docName, setDocName] = useState('');
     const [saving, setSaving] = useState(false);
+    const [exportingXlsx, setExportingXlsx] = useState(false);
     const [dirty, setDirty] = useState(false);
     const [versionsOpen, setVersionsOpen] = useState(false);
     const [versions, setVersions] = useState<DocumentVersion[]>([]);
@@ -88,6 +90,8 @@ export function EditorPage() {
     } | null>(null);
     /** 最新的 peers，供引擎重建时立刻补画远端选区 */
     const peersRef = useRef<Peer[]>([]);
+    /** 是否可编辑（角色确认后）。选区广播只看它，避免角色异步加载前的竞态 */
+    const canEditRef = useRef(false);
 
     const onStructureChange = useCallback(() => {
         setStructureVersion((v) => v + 1);
@@ -99,10 +103,12 @@ export function EditorPage() {
 
     peersRef.current = peers;
 
-    /** 别人的选区变化 → 直接灌进渲染层（不经过 React 树，只触发一次重绘） */
+    /** 别人的选区变化 → 直接灌进渲染层（不经过 React 树，只触发一次重绘）。
+     * 只读（VIEWER）看不到别人的选区：直接清空；`myRole` 变化时也会重算。 */
     useEffect(() => {
-        engineRef.current?.setRemoteSelections(toRemoteSelections(peers));
-    }, [peers]);
+        const canSeeRemote = myRole === 'OWNER' || myRole === 'EDITOR';
+        engineRef.current?.setRemoteSelections(canSeeRemote ? toRemoteSelections(peers) : []);
+    }, [peers, myRole]);
 
     /** 重新加载：先强制重连（普通 connect 对卡死的连接是幂等的），再触发载入流程 */
     const retryLoad = useCallback(() => {
@@ -211,6 +217,11 @@ export function EditorPage() {
 
     const isReadonly = myRole === 'VIEWER';
     const canEdit = myRole === 'OWNER' || myRole === 'EDITOR';
+    /** 文件名只有创建者能改（后端同样会拦） */
+    const isOwner = myRole === 'OWNER';
+    // 选区广播只看「可编辑」，不只看「非只读」：角色还没拉回来（myRole 为 null）时
+    // 既不算只读也不能编辑，这时广播会把只读用户的选区漏出去，所以一律等角色确认。
+    canEditRef.current = canEdit;
 
     const handleEngineReady = useCallback(
         (engine: SheetEngine | null) => {
@@ -231,23 +242,40 @@ export function EditorPage() {
                     });
                 }
                 // 任何本地改动都标记「有未存档的版本」
-                const off = engine.on('content-change', () => setDirty(true));
-                engine.on('selection-change', () => {
+                const offContent = engine.on('content-change', () => setDirty(true));
+                // 只读（或角色未确认）不把自己的选区广播出去
+                const offSelection = engine.on('selection-change', () => {
+                    if (!canEditRef.current) return;
                     // 把完整选区（多块 + 活动格）广播出去，别人才能看到我在选哪片
                     docSyncRef.current?.setLocalSelection(engine.getSelection());
                 });
-                // 引擎就绪时先把当前已有的远端选区灌进去
-                engine.setRemoteSelections(toRemoteSelections(peersRef.current));
-                // 顺手把自己的初始选区广播出去（不然别人要等我点一下才看得到）
-                docSyncRef.current?.setLocalSelection(engine.getSelection());
+                // 引擎就绪时先把当前已有的远端选区灌进去；
+                // 只读（或角色未确认）不显示别人的选区，等角色确认后再由 peers effect 重算
+                engine.setRemoteSelections(
+                    canEditRef.current ? toRemoteSelections(peersRef.current) : []
+                );
+                // 角色已确认可编辑时，顺手把自己的初始选区广播出去
+                // （只读用户这里不广播；若角色比引擎晚到，由下面的 effect 补一次）
+                if (canEditRef.current) {
+                    docSyncRef.current?.setLocalSelection(engine.getSelection());
+                }
                 return () => {
-                    off();
+                    offContent();
+                    offSelection();
                 };
             }
             return undefined;
         },
         [attach, docSync]
     );
+
+    // 角色从「未知」确认到「可编辑」后，补一次初始选区广播。
+    // 只读（VIEWER）走不到这：canEdit 恒为 false，选区从不在任何时刻外发。
+    useEffect(() => {
+        if (!canEdit) return;
+        const engine = engineRef.current;
+        if (engine) docSyncRef.current?.setLocalSelection(engine.getSelection());
+    }, [canEdit]);
 
     async function handleSave() {
         if (saving) return;
@@ -344,20 +372,29 @@ export function EditorPage() {
         const engine = engineRef.current;
         if (!engine) return;
         const json = JSON.stringify(engine.toJSON(), null, 2);
-        const blob = new Blob([json], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const anchor = document.createElement('a');
-        anchor.href = url;
-        anchor.download = `${docName || '工作簿'}.json`;
-        anchor.click();
-        URL.revokeObjectURL(url);
+        downloadBlob(new Blob([json], { type: 'application/json' }), `${docName || '工作簿'}.json`);
+    }
+
+    /** 导出 xlsx —— 由服务端基于权威 Y.Doc 生成，前端只负责下载 */
+    async function handleExportXlsx() {
+        if (exportingXlsx) return;
+        setExportingXlsx(true);
+        try {
+            const blob = await documentsApi.exportXlsx(id);
+            downloadBlob(blob, `${docName || '工作簿'}.xlsx`);
+            messageApi.success('已导出 Excel');
+        } catch (err) {
+            messageApi.error(err instanceof Error ? err.message : '导出 Excel 失败');
+        } finally {
+            setExportingXlsx(false);
+        }
     }
 
     // ────────────────────────── 文档名（点击即编辑）──────────────────────────
 
     function startRename() {
-        // 载入中还没有名字，点开只会是个空输入框
-        if (isReadonly || loading) return;
+        // 载入中还没有名字，点开只会是个空输入框；只有创建者能改文件名
+        if (!isOwner || loading) return;
         setNameDraft(docName);
         renamingRef.current = true;
         setRenaming(true);
@@ -432,11 +469,18 @@ export function EditorPage() {
                         },
                         { type: 'divider' },
                         { key: 'versions', label: '版本历史', icon: <HistoryOutlined /> },
+                        {
+                            key: 'export-xlsx',
+                            label: exportingXlsx ? '正在导出…' : '导出 Excel (.xlsx)',
+                            icon: <FileExcelOutlined />,
+                            disabled: exportingXlsx,
+                        },
                         { key: 'export', label: '导出 JSON', icon: <DownloadOutlined /> },
                     ],
                     onClick: ({ key }) => {
                         if (key === 'save') void handleSave();
                         if (key === 'versions') openVersions();
+                        if (key === 'export-xlsx') void handleExportXlsx();
                         if (key === 'export') handleExport();
                     },
                 }}
@@ -451,9 +495,6 @@ export function EditorPage() {
             <div style={styles.root}>
                 <div style={styles.titleBar}>
                     <Space size={8}>
-                        <a onClick={() => navigate('/')} style={styles.back}>
-                            ← 文档列表
-                        </a>
                         {renaming ? (
                             <Input
                                 size="small"
@@ -474,12 +515,20 @@ export function EditorPage() {
                             />
                         ) : (
                             !loading && (
-                                <Tooltip title={isReadonly ? '只读，无法重命名' : '点击重命名'}>
+                                <Tooltip
+                                    title={
+                                        isReadonly
+                                            ? '只读，无法重命名'
+                                            : isOwner
+                                              ? '点击重命名'
+                                              : '只有创建者可以修改文件名'
+                                    }
+                                >
                                     <Text
                                         strong
                                         style={{
                                             fontSize: 15,
-                                            cursor: isReadonly ? 'default' : 'text',
+                                            cursor: isOwner ? 'text' : 'default',
                                         }}
                                         onClick={startRename}
                                     >
@@ -656,6 +705,16 @@ function formatBytes(bytes: number): string {
     return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+/** 触发浏览器下载。Blob URL 用完立刻回收，避免内存泄漏 */
+function downloadBlob(blob: Blob, filename: string): void {
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.click();
+    URL.revokeObjectURL(url);
+}
+
 const styles = {
     root: {
         display: 'flex',
@@ -672,11 +731,6 @@ const styles = {
         paddingInline: 16,
         borderBottom: '1px solid #e5e6eb',
         background: '#fff',
-    },
-    back: {
-        cursor: 'pointer',
-        color: '#3370ff',
-        whiteSpace: 'nowrap' as const,
     },
     sheetArea: {
         flex: 1,

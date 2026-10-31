@@ -28,10 +28,11 @@ export const fontExtension: ISheetExtension = {
         const { ctx, skeleton, worksheet, styles, view } = dc;
 
         forEachVisibleCell(worksheet.cellData.matrix, view, (row, column, cell) => {
-            const text = worksheet.cellText(cell);
+            const style = worksheet.resolveCell(row, column, styles);
+            // 先解析样式再取文本：数字格式（日期/百分比）要靠它渲染
+            const text = worksheet.cellText(cell, style);
             if (text === '') return;
 
-            const style = worksheet.resolveCell(row, column, styles);
             const rect = skeleton.cellRect(row, column);
             if (rect.width <= 0 || rect.height <= 0) return;
 
@@ -116,9 +117,9 @@ function measureSpillRight(
 
     for (let c = column + 1; c < worksheet.columnCount; c++) {
         const neighbor = worksheet.getCell(row, c);
-        if (neighbor && worksheet.cellText(neighbor) !== '') break;
-
         const neighborStyle = worksheet.resolveCell(row, c, styles);
+        if (neighbor && worksheet.cellText(neighbor, neighborStyle) !== '') break;
+
         if (skeleton.resolveColor(neighborStyle?.bg)) break;
 
         rightEdge = skeleton.cellRect(row, c).x + skeleton.getColumnWidth(c) - paddingR;

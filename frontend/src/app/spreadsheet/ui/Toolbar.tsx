@@ -27,13 +27,15 @@ import {
 interface ToolbarProps {
     engine: SheetEngine | null;
     state: ISheetState | null;
+    /** 只读模式：禁用所有写操作入口（浏览/选中仍可用） */
+    readOnly?: boolean;
 }
 
 const FONT_SIZES = [9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36];
 
 const DEFAULT_BORDER_COLOR = '#1f2329';
 
-export function Toolbar({ engine, state }: ToolbarProps) {
+export function Toolbar({ engine, state, readOnly = false }: ToolbarProps) {
     const style = state?.style ?? {};
 
     const apply = (patch: IStylePatch, label: string) => {
@@ -57,7 +59,7 @@ export function Toolbar({ engine, state }: ToolbarProps) {
                         <Button
                             type="text"
                             aria-label="撤销"
-                            disabled={!state?.canUndo}
+                            disabled={readOnly || !state?.canUndo}
                             onClick={() => engine?.undo()}
                             icon={<UndoIcon />}
                         />
@@ -66,7 +68,7 @@ export function Toolbar({ engine, state }: ToolbarProps) {
                         <Button
                             type="text"
                             aria-label="重做"
-                            disabled={!state?.canRedo}
+                            disabled={readOnly || !state?.canRedo}
                             onClick={() => engine?.redo()}
                             icon={<RedoIcon />}
                         />
@@ -77,24 +79,28 @@ export function Toolbar({ engine, state }: ToolbarProps) {
                     <ToggleButton
                         active={style.bl === 1}
                         title="加粗 (Ctrl+B)"
+                        disabled={readOnly}
                         onClick={toggle('bl')}
                         label={<b>B</b>}
                     />
                     <ToggleButton
                         active={style.it === 1}
                         title="斜体 (Ctrl+I)"
+                        disabled={readOnly}
                         onClick={toggle('it')}
                         label={<i style={{ fontFamily: 'serif' }}>I</i>}
                     />
                     <ToggleButton
                         active={style.ul?.s === 1}
                         title="下划线 (Ctrl+U)"
+                        disabled={readOnly}
                         onClick={toggle('ul')}
                         label={<span style={styles.underline}>U</span>}
                     />
                     <ToggleButton
                         active={style.st?.s === 1}
                         title="删除线"
+                        disabled={readOnly}
                         onClick={toggle('st')}
                         label={<span style={styles.strike}>S</span>}
                     />
@@ -105,6 +111,7 @@ export function Toolbar({ engine, state }: ToolbarProps) {
                         size="small"
                         style={{ width: 68 }}
                         value={fontSize}
+                        disabled={readOnly}
                         options={FONT_SIZES.map((size) => ({ value: size, label: String(size) }))}
                         onChange={(value) => apply({ fs: value }, '字号')}
                         showSearch
@@ -113,6 +120,7 @@ export function Toolbar({ engine, state }: ToolbarProps) {
                         <ColorPicker
                             size="small"
                             value={fontColor}
+                            disabled={readOnly}
                             onChangeComplete={(color) =>
                                 apply({ cl: { rgb: color.toHexString() } }, '字体颜色')
                             }
@@ -122,6 +130,7 @@ export function Toolbar({ engine, state }: ToolbarProps) {
                         <ColorPicker
                             size="small"
                             value={bgColor}
+                            disabled={readOnly}
                             onChangeComplete={(color) =>
                                 apply({ bg: { rgb: color.toHexString() } }, '背景色')
                             }
@@ -133,6 +142,7 @@ export function Toolbar({ engine, state }: ToolbarProps) {
                     <AlignDropdown
                         title="水平对齐"
                         active={hAlign}
+                        disabled={readOnly}
                         items={[
                             { key: 'left', icon: <AlignLeftIcon />, label: '左对齐', value: HorizontalAlign.LEFT },
                             { key: 'center', icon: <AlignCenterIcon />, label: '居中', value: HorizontalAlign.CENTER },
@@ -143,6 +153,7 @@ export function Toolbar({ engine, state }: ToolbarProps) {
                     <AlignDropdown
                         title="垂直对齐"
                         active={vAlign}
+                        disabled={readOnly}
                         items={[
                             { key: 'top', icon: <AlignTopIcon />, label: '顶端对齐', value: VerticalAlign.TOP },
                             { key: 'middle', icon: <AlignMiddleIcon />, label: '垂直居中', value: VerticalAlign.MIDDLE },
@@ -154,6 +165,7 @@ export function Toolbar({ engine, state }: ToolbarProps) {
                         <Button
                             type="text"
                             aria-label="自动换行"
+                            disabled={readOnly}
                             style={wrap ? styles.activeButton : undefined}
                             onClick={() => apply(wrapPatch(!wrap), '自动换行')}
                             icon={<WrapIcon />}
@@ -176,13 +188,14 @@ export function Toolbar({ engine, state }: ToolbarProps) {
                             ),
                     }}
                 >
-                    <Button type="text" aria-label="边框" icon={<BorderIcon />} />
+                    <Button type="text" aria-label="边框" disabled={readOnly} icon={<BorderIcon />} />
                 </Dropdown>
 
                 <Tooltip title="清除内容 (Delete)">
                     <Button
                         type="text"
                         aria-label="清除内容"
+                        disabled={readOnly}
                         icon={<ClearIcon />}
                         onClick={() => engine?.clearSelection()}
                     />
@@ -199,15 +212,17 @@ interface ToggleButtonProps {
     title: string;
     label: ReactNode;
     onClick: () => void;
+    disabled?: boolean;
 }
 
-function ToggleButton({ active, title, label, onClick }: ToggleButtonProps) {
+function ToggleButton({ active, title, label, onClick, disabled = false }: ToggleButtonProps) {
     return (
         <Tooltip title={title}>
             <Button
                 type="text"
                 aria-label={title}
                 aria-pressed={active}
+                disabled={disabled}
                 onClick={onClick}
                 style={active ? { ...styles.activeButton, ...styles.glyphButton } : styles.glyphButton}
             >
@@ -222,9 +237,10 @@ interface AlignDropdownProps {
     active: number;
     items: Array<{ key: string; icon: ReactNode; label: string; value: number }>;
     onPick: (value: number) => void;
+    disabled?: boolean;
 }
 
-function AlignDropdown({ title, active, items, onPick }: AlignDropdownProps) {
+function AlignDropdown({ title, active, items, onPick, disabled = false }: AlignDropdownProps) {
     const current = items.find((item) => item.value === active) ?? items[0];
 
     return (
@@ -239,7 +255,13 @@ function AlignDropdown({ title, active, items, onPick }: AlignDropdownProps) {
             }}
         >
             <Tooltip title={title}>
-                <Button type="text" aria-label={title} style={styles.glyphButton} icon={current?.icon} />
+                <Button
+                    type="text"
+                    aria-label={title}
+                    disabled={disabled}
+                    style={styles.glyphButton}
+                    icon={current?.icon}
+                />
             </Tooltip>
         </Dropdown>
     );

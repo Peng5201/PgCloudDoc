@@ -60,8 +60,8 @@ PgCloudDoc/
 │   │   ├── config/       环境变量 zod 校验 + 分层配置
 │   │   ├── common/       横切：中间件 / 异常过滤器 / 拦截器 / Guard / 装饰器 / 错误码
 │   │   ├── component/    工作表数据定义（IWorkbookData 示例，旧 /api/testSheet 用）
-│   │   ├── infra/        prisma · redis · kafka · yjs
-│   │   └── modules/      auth · users · documents · collab · jobs · health
+│   │   ├── infra/        prisma · redis · kafka · yjs（外部系统适配）
+│   │   └── modules/      auth · users · documents（含 formats/ 工作簿文件格式） · collab · jobs · health
 │   ├── kafka/        Kafka 单节点配置（开发用）
 │   ├── Dockerfile    多阶段构建：deps → build → prod-deps → migrator → runtime
 │   ├── test/         集成冒烟脚本
@@ -242,6 +242,8 @@ docker exec pgclouddoc-prod-postgres-1 pg_dump -U pgclouddoc pgclouddoc | gzip >
 | 能力 | 表现 |
 | --- | --- |
 | 实时同步 | 输入即广播，多人同时改同一格的不同字段也不会丢 |
+| 单元格格式 | 字体、颜色、对齐、边框等通过共享样式表同步，工具栏操作别人立即可见 |
+| 表结构 | 新建 / 删除 / 重命名工作表实时同步 |
 | 在线状态 | 顶栏显示协作者头像与人数，颜色区分身份 |
 | 选区可见 | 别人的选区以半透明色块 + 名字标签显示 |
 | 权限 | 创建者 / 编辑 / 只读 / 不可见，无权限可申请 |
@@ -276,6 +278,7 @@ docker exec pgclouddoc-prod-postgres-1 pg_dump -U pgclouddoc pgclouddoc | gzip >
 - 不可见返回 404（防 id 枚举），角色不足返回 403
 - 无权限 → 申请页 → 创建者收消息 → 审批时选「只读 / 编辑」→ 结果回推申请人
 - 只读双保险：前端引擎禁用写入，服务端丢弃只读用户的 update
+- **文件名只有创建者能改**：编辑者可改内容和格式，但不能改文件名（界面禁用 + 服务端拦截）
 - 创建者可随时调整协作者角色或移除成员
 
 ### 6.5 保存、版本与容错
@@ -341,41 +344,22 @@ NestJS 后端
 
 **缓存层（Redis）** —— Cache-Aside / Read-Through / 滑动窗口限流 / 分布式锁等结构齐全；穿透（空值缓存 + 布隆）、击穿（互斥锁 + 逻辑过期）、雪崩（TTL 抖动）都处理；Redis 挂了通过 `safe()` 包装降级直读 PG。
 
+**Excel 导入导出** —— 解析与生成都在服务端（ExcelJS），导入 = 解析 → `applySnapshot` 写入 Y.Doc → 归档；导出 = 基于服务端 Y.Doc 生成文件流。能力概览见 7.4。
+
 **为什么没有 supertest 的 e2e** —— Nest 12 是纯 ESM 包，jest 30 在 Node 22 上不支持 `require(esm)`。所以单元测试只测无框架依赖的纯逻辑，端到端走打真实 HTTP 的冒烟脚本，反而更接近生产路径。
 
----
+### 7.4 导入导出的数据类型能力
 
-## 附录：常见问题
+数据类型边界
+见 [backend/src/modules/documents/formats/xlsx/DATA-TYPES.md](backend/src/modules/documents/formats/xlsx/DATA-TYPES.md)，这里只列概览：
 
-**启动报 `Cannot find module './generated/client'`**
-忘了跑 Prisma 代码生成。执行 `pnpm --filter backend db:generate`。
-
-**`pnpm install` 报 `ERR_PNPM_IGNORED_BUILDS`**
-`prisma` / `@prisma/engines` 需要执行安装脚本，已在 [pnpm-workspace.yaml](pnpm-workspace.yaml) 的 `allowBuilds` 白名单里；若仍报错，再跑一次 `pnpm install`。
-
-**Kafka 容器一直重启（`Restarting`）**
-看日志 `docker logs pgclouddoc-kafka`。最常见原因是 [backend/kafka/server.properties](backend/kafka/server.properties) 没挂载 —— 这里刻意用配置文件挂载而非 `KAFKA_*` 环境变量，因为镜像的环境变量映射对 `advertised.listeners` 不生效。
-
-**Vite 提示 `Port 5173 is in use, trying another one`**
-5173 上有旧 vite 进程。它会自动换到 5174，但旧进程没有 `/collab` 的 WebSocket 代理，协同连不上。手动访问新端口，或杀掉旧进程：
-
-```powershell
-Get-NetTCPConnection -LocalPort 5173 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
-```
-
-**控制台日志中文乱码（如 `鎺ュ叆鍗忓悓`）**
-
-不是服务端问题：Node 始终输出 UTF-8，是 Windows 终端按 GBK（代码页 936）解码导致的显示问题。在那个终端执行 `chcp 65001` 即可；要永久生效，在 PowerShell 配置文件（`$PROFILE`）里加一行：
-
-```powershell
-$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
-```
-
-**改了 `backend/.env` 不生效**
-环境变量只在进程启动时读一次，改完要重启后端。
-
-**`pnpm --filter backend test` 里没有针对 Nest 装配的测试**
-已知限制：Nest 12 是纯 ESM，jest 30 在 Node 22 上装不进来。单元测试只覆盖无框架依赖的纯逻辑，端到端走打真实 HTTP 的冒烟脚本。
+- **单元格值**：文本、数字、布尔、日期、公式、错误值、富文本、超链接、空单元格、合并区从属格
+- **数字格式**：支持整数 / 小数 / 千分位 / 百分比 / 日期 / 时间 / 字面量；降级项：货币符号字面量被丢弃、科学计数不准确、多段格式只取第一段
+- **样式**：字体 / 填充 / 对齐 / 换行 / 边框 / 行列级样式；主题色、渐变、保护、缩进、文本旋转不映射
+- **工作表结构**：合并、宽高、隐藏、默认宽高、网格线、冻结；缩放不保留
+- **明确不支持**：图表、图片、条件格式、数据验证、批注、透视表、命名区域、宏、`.xls`、1904 日期系统
+- **体量约束**：单次上传 20MB / 单元格 200 万 / 解析在请求线程同步执行
+- **显示层优先级**：`cellText` 依次取 公式原文 → 空串 → `TRUE/FALSE` → 按数字格式渲染 → `String(v)`
 
 ---
 

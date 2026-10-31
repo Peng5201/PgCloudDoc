@@ -20,7 +20,10 @@ import {
     Post,
     Query,
     Res,
+    UploadedFile,
+    UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import type { Response } from 'express';
 import { DocumentService } from './document.service';
 import {
@@ -34,11 +37,16 @@ import {
     MemberDto,
     UpdateDocumentDto,
 } from './dto/document.dto';
+import { AppError } from '../../common/errors/app-error';
+import { findFormat, supportedExtensions } from './formats';
 import { CurrentUser, type AuthUser } from '../../common/decorators/auth.decorators';
 import { PageResult } from '../../common/dto/pagination.dto';
 import { HttpCache, ETAG_LOCAL } from '../../common/interceptors/http-cache.interceptor';
 import { SkipWrap } from '../../common/interceptors/response.interceptor';
 import type { SnapshotWorkbook } from '../../infra/yjs/ydoc.types';
+
+/** 单次上传上限。真正的体量保护在 service 的单元格计数 */
+const MAX_XLSX_BYTES = 20 * 1024 * 1024;
 
 @Controller('api/v1/documents')
 export class DocumentsController {
@@ -58,6 +66,54 @@ export class DocumentsController {
         @Body() dto: CreateDocumentDto
     ): Promise<DocumentDetail> {
         return this.documents.create(user.id, dto);
+    }
+
+    /**
+     * 导入工作簿文件 —— 解析后**新建**一份文档。
+     *
+     * 支持的格式由 `formats/` 注册表决定（目前 `.xlsx / .xlsm`）。
+     * 解析与写 Y.Doc 都在服务端完成，前端只需要拿到新文档详情然后跳转。
+     */
+    @Post('import')
+    @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_XLSX_BYTES } }))
+    importDocument(
+        @CurrentUser() user: AuthUser,
+        @UploadedFile() file: Express.Multer.File | undefined
+    ): Promise<DocumentDetail> {
+        if (!file?.buffer?.length) {
+            throw AppError.badRequest('请选择要导入的文件');
+        }
+        if (!findFormat(file.originalname)) {
+            throw AppError.badRequest(`只支持 ${supportedExtensions().join(' / ')} 格式`);
+        }
+        return this.documents.importDocument(user.id, {
+            buffer: file.buffer,
+            originalname: decodeUploadFilename(file.originalname),
+        });
+    }
+
+    /**
+     * 导出工作簿 —— 以服务端 Y.Doc 为准，直接回二进制流。
+     *
+     * 不走统一信封：这里返回的就是文件本身。
+     */
+    @SkipWrap()
+    @Get(':id/export.xlsx')
+    async exportDocument(
+        @CurrentUser() user: AuthUser,
+        @Param('id') id: string,
+        @Res() res: Response
+    ): Promise<void> {
+        const { buffer, filename, contentType } = await this.documents.exportDocument(user.id, id);
+
+        res.setHeader('Content-Type', contentType);
+        // filename* 用 UTF-8 百分号编码，中文名不会乱码
+        res.setHeader(
+            'Content-Disposition',
+            `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`
+        );
+        res.setHeader('Content-Length', String(buffer.length));
+        res.end(buffer);
     }
 
     @HttpCache({ etag: 'auto', maxAgeSeconds: 0, private: true, mustRevalidate: true })
@@ -239,4 +295,16 @@ export class DocumentsController {
     ): Promise<void> {
         return this.documents.rejectAccessRequest(user.id, id, requestId);
     }
+}
+
+/**
+ * 还原 multipart 文件名编码。
+ *
+ * busboy / multer 会把 UTF-8 文件名的字节按 latin1 解出来，中文会变成 `æµè¯`。
+ * 这里按 latin1 → utf8 还原；纯 ASCII 或还原后出现替换字符的，保持原样。
+ */
+function decodeUploadFilename(name: string): string {
+    if (!/[\u0080-ÿ]/.test(name)) return name;
+    const decoded = Buffer.from(name, 'latin1').toString('utf8');
+    return decoded.includes('�') ? name : decoded;
 }

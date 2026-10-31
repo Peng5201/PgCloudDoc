@@ -16,9 +16,11 @@ import type { ISheetState, SheetEngine } from '../engine';
 interface SheetBarProps {
     engine: SheetEngine | null;
     state: ISheetState | null;
+    /** 只读模式：禁用增删改 sheet，仅可切换查看 */
+    readOnly?: boolean;
 }
 
-export function SheetBar({ engine, state }: SheetBarProps) {
+export function SheetBar({ engine, state, readOnly = false }: SheetBarProps) {
     const [renamingId, setRenamingId] = useState<string | null>(null);
     const [renameDraft, setRenameDraft] = useState('');
     const inputRef = useRef<InputRef>(null);
@@ -31,6 +33,7 @@ export function SheetBar({ engine, state }: SheetBarProps) {
     const activeId = state?.sheetId ?? '';
 
     const startRename = (id: string, name: string) => {
+        if (readOnly) return;
         setRenamingId(id);
         setRenameDraft(name);
     };
@@ -95,22 +98,18 @@ export function SheetBar({ engine, state }: SheetBarProps) {
                                 trigger={['click']}
                                 menu={{
                                     items: [
-                                        { key: 'rename', label: '重命名' },
-                                        { key: 'duplicate', label: '复制' },
+                                        { key: 'rename', label: '重命名', disabled: readOnly },
                                         {
                                             key: 'delete',
                                             label: '删除',
                                             danger: true,
-                                            disabled: sheets.length <= 1,
+                                            disabled: readOnly || sheets.length <= 1,
                                         },
                                     ],
                                     onClick: ({ key, domEvent }) => {
                                         domEvent.stopPropagation();
                                         if (key === 'rename') {
                                             startRename(sheet.id, sheet.name);
-                                        } else if (key === 'duplicate') {
-                                            const newId = engine?.addSheet(`${sheet.name} 副本`);
-                                            if (newId) engine?.setActiveSheet(newId);
                                         } else if (key === 'delete') {
                                             engine?.removeSheet(sheet.id);
                                         }
@@ -121,6 +120,7 @@ export function SheetBar({ engine, state }: SheetBarProps) {
                                     type="text"
                                     size="small"
                                     tabIndex={-1}
+                                    disabled={readOnly}
                                     style={styles.more}
                                     onClick={(event) => event.stopPropagation()}
                                 >
@@ -138,6 +138,7 @@ export function SheetBar({ engine, state }: SheetBarProps) {
                         type="text"
                         size="small"
                         aria-label="新增工作表"
+                        disabled={readOnly}
                         onClick={() => engine?.addSheet()}
                         icon={<span style={styles.plus}>＋</span>}
                     />

@@ -40,10 +40,10 @@ export function SheetView({ snapshot, onEngineReady, readOnly = false }: SheetVi
 
     return (
         <div style={styles.root}>
-            <Toolbar engine={engine} state={state} />
-            <FormulaBar engine={engine} state={state} />
+            <Toolbar engine={engine} state={state} readOnly={readOnly} />
+            <FormulaBar engine={engine} state={state} readOnly={readOnly} />
             <div ref={containerRef} style={styles.grid} />
-            <SheetBar engine={engine} state={state} />
+            <SheetBar engine={engine} state={state} readOnly={readOnly} />
             <StatusBar engine={engine} state={state} />
         </div>
     );

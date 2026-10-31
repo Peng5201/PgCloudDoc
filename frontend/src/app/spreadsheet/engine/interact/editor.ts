@@ -107,7 +107,7 @@ export class CellEditor {
 
         const cell = worksheet.getCell(row, column);
         const style = worksheet.resolveCell(row, column, workbook.styles);
-        const text = initialValue ?? worksheet.cellText(cell);
+        const text = initialValue ?? worksheet.cellText(cell, style);
 
         this.element.value = text;
         this.element.style.display = 'block';

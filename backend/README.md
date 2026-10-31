@@ -67,6 +67,7 @@ src/
     auth/          注册 登录 刷新 登出 + 双 token + OAuth2
     users/         资料
     documents/     CRUD + 快照 + 版本历史/回滚
+      formats/     工作簿文件格式（xlsx 读写，按扩展名分发，可扩展 csv 等）
     collab/        WebSocket 协同服务（y-protocols sync + awareness）
     jobs/          Kafka 消费者（归档/审计）+ cron 清理
     health/        liveness / readiness / 依赖详情

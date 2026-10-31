@@ -138,6 +138,15 @@ export interface IEngineChangeHooks {
         next: IColumnData | undefined,
         before: IColumnData | undefined
     ): void;
+    /**
+     * 结构性改动：增删 / 重命名工作表。
+     *
+     * 频率极低，但必须同步 —— 否则本地新建的 sheet 只存在于当前浏览器里。
+     * 单元格数据仍走上面的增量钩子。
+     */
+    onSheetAdd?(sheet: Worksheet, index: number): void;
+    onSheetRemove?(sheetId: string, index: number): void;
+    onSheetRename?(sheetId: string, name: string): void;
 }
 
 const EMPTY_STATS: ISelectionStats = {
@@ -301,6 +310,8 @@ export class SheetEngine {
         const selection = this.controller.selection;
         const active = selection.active;
         const cell = worksheet.getCell(active.row, active.column);
+        // 活动格样式算一次，cellText（数字格式渲染）和工具栏按下态共用
+        const activeStyle = readActiveStyle(this.workbook, worksheet, active);
 
         return {
             sheets: this.workbook.getSheets().map((sheet) => ({
@@ -316,7 +327,7 @@ export class SheetEngine {
             selectionLabel: rangeLabel(selection, worksheet.rowCount, worksheet.columnCount),
             selectedCount: selectedCount(selection),
 
-            cellText: worksheet.cellText(cell),
+            cellText: worksheet.cellText(cell, activeStyle),
             editText: this.controller.editor.isOpen ? this.controller.editor.value : this._editText,
             isEditing: this.controller.editor.isOpen,
 
@@ -330,7 +341,7 @@ export class SheetEngine {
             redoLabel: this.history.redoLabel ?? '',
 
             stats: this._computeStats(),
-            style: readActiveStyle(this.workbook, worksheet, active),
+            style: activeStyle,
         };
     }
 
@@ -544,6 +555,8 @@ export class SheetEngine {
         });
         this.workbook.addSheet(sheet);
         this._registerWorksheet(sheet);
+        // 协同层据此在 Y.Doc 里建出同样的表（index 是追加位置）
+        this._changeHooks?.onSheetAdd?.(sheet, index);
         this.setActiveSheet(id);
         this._emit('content-change');
         return id;
@@ -554,10 +567,13 @@ export class SheetEngine {
         // 至少留一张表，否则整个视图没东西可画
         if (this.workbook.sheetOrder.length <= 1) return false;
 
+        const index = this.workbook.sheetOrder.indexOf(sheetId);
+        if (index < 0) return false;
         const wasActive = this._ref.worksheet.id === sheetId;
         if (!this.workbook.removeSheet(sheetId)) return false;
 
         this._skeletons.delete(sheetId);
+        this._changeHooks?.onSheetRemove?.(sheetId, index);
 
         if (wasActive) {
             const next = this.workbook.getActiveSheet();
@@ -571,6 +587,7 @@ export class SheetEngine {
         if (this._readOnly) return false;
         const ok = this.workbook.renameSheet(sheetId, name);
         if (ok) {
+            this._changeHooks?.onSheetRename?.(sheetId, name);
             this._emit('content-change');
             this._emit('sheet-change');
         }
@@ -620,6 +637,18 @@ export class SheetEngine {
         }
         this.renderer.invalidate();
         this._emit('content-change');
+    }
+
+    /**
+     * 远端改了表级元信息（名字 / tabColor / 隐藏）。
+     *
+     * 和 notifyExternalChange 分开：这类改动不涉及单元格数据，不需要清骨架，
+     * 但要发 `sheet-change` 让标签栏重新读 state。
+     */
+    notifySheetMetaChange(): void {
+        if (this._disposed) return;
+        this.renderer.invalidate();
+        this._emit('sheet-change');
     }
 
     // ─────────────────────────── 序列化 ───────────────────────────

@@ -3,7 +3,7 @@
  * 字段名与后端 `backend/src/modules/documents/dto/document.dto.ts` 一一对应。
  */
 
-import { api, request } from './client';
+import { api, request, refreshAccessToken, ApiError } from './client';
 import type { IWorkbookData } from '../spreadsheet/engine';
 
 export interface DocumentSummary {
@@ -110,6 +110,43 @@ export const documentsApi = {
 
     duplicate(id: string): Promise<DocumentDetail> {
         return api.post<DocumentDetail>(`/api/v1/documents/${id}/duplicate`);
+    },
+
+    /**
+     * 导入 xlsx 为**新文档**。解析在服务端完成，这里只负责上传文件。
+     * 成功返回新文档详情，调用方跳过去即可。
+     */
+    importXlsx(file: File): Promise<DocumentDetail> {
+        const form = new FormData();
+        form.append('file', file, file.name);
+        return api.post<DocumentDetail>('/api/v1/documents/import', form);
+    },
+
+    /**
+     * 服务端导出 xlsx，返回文件 Blob。
+     *
+     * 用 `raw` 请求自己拿二进制；失败时尽量把后端的错误信封解出来。
+     */
+    async exportXlsx(id: string): Promise<Blob> {
+        const url = `/api/v1/documents/${id}/export.xlsx`;
+        let response = await request<Response>(url, { raw: true });
+
+        // raw 请求不走 401 自动续期，这里自己补一次
+        if (response.status === 401 && (await refreshAccessToken())) {
+            response = await request<Response>(url, { raw: true });
+        }
+
+        if (!response.ok) {
+            let message = `导出失败（${response.status}）`;
+            try {
+                const body = (await response.json()) as { message?: string };
+                if (body?.message) message = body.message;
+            } catch {
+                // 非 JSON 响应，用默认文案
+            }
+            throw new ApiError('EXPORT_FAILED', message, response.status);
+        }
+        return response.blob();
     },
 
     /**

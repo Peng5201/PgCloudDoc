@@ -37,6 +37,14 @@ export class Workbook {
     /** 同一份 JSON 只占一个 id，反过来靠这个 map 做 O(1) 查重 */
     private readonly _styleIndex = new Map<string, string>();
 
+    /**
+     * 新样式注册回调。协同层用它把新样式写进 Y.Doc 的共享样式表。
+     *
+     * 没有这个钩子，本地改样式只会同步 `cell.s`（一个 id），
+     * 其他协作者拿到 id 却找不到样式 —— 表现就是「工具栏操作别人看不到」。
+     */
+    onStyleRegister: ((id: string, style: IStyleData) => void) | null = null;
+
     constructor(init: {
         id: string;
         name: string;
@@ -131,8 +139,7 @@ export class Workbook {
     // ─────────────────────────── 样式 ───────────────────────────
 
     private _styleKey(style: IStyleData): string {
-        // 用排序后的 key 保证 {a:1,b:2} 与 {b:2,a:1} 判为同一份
-        return JSON.stringify(style, Object.keys(style).sort());
+        return canonicalStringify(style);
     }
 
     /**
@@ -144,10 +151,23 @@ export class Workbook {
         const existing = this._styleIndex.get(key);
         if (existing !== undefined) return existing;
 
-        const id = `s${Object.keys(this.styles).length + 1}`;
+        // 内容寻址：id 由内容哈希决定，两端算出的同一份样式必然同 id，
+        // 不同样式不会撞号。用自增计数会在协同里互相覆盖别人的样式。
+        const id = `sh${hashStyleKey(key)}`;
         this.styles[id] = { ...style };
         this._styleIndex.set(key, id);
+        this.onStyleRegister?.(id, this.styles[id]);
         return id;
+    }
+
+    /**
+     * 接收远端样式：按 id 写入，不触发注册回调（避免回声）。
+     * 同时补进查重索引，之后本地产生同样式时能复用这个 id。
+     */
+    addStyle(id: string, style: IStyleData): void {
+        this.styles[id] = style;
+        const key = this._styleKey(style);
+        if (!this._styleIndex.has(key)) this._styleIndex.set(key, id);
     }
 
     /**
@@ -226,3 +246,31 @@ export class Workbook {
 }
 
 export type { Worksheet, ObjectMatrixPrimitive };
+
+// ─────────────────────────── 样式指纹 ───────────────────────────
+
+/**
+ * 递归排序对象键后的 JSON 串，用作样式指纹。
+ *
+ * 必须递归：样式里有 `cl:{rgb}`、`bd:{t:{s,cl}}` 这类嵌套对象。
+ * `JSON.stringify(style, keys)` 的 replacer 数组会连嵌套键一起过滤，
+ * 导致「只差颜色」的两份样式被判成同一份。
+ */
+function canonicalStringify(value: unknown): string {
+    if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+    if (Array.isArray(value)) return `[${value.map(canonicalStringify).join(',')}]`;
+    const obj = value as Record<string, unknown>;
+    const keys = Object.keys(obj).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalStringify(obj[k])}`).join(',')}}`;
+}
+
+/** FNV-1a 64 位 → base36。样式数量少，碰撞概率可忽略 */
+function hashStyleKey(key: string): string {
+    let hash = 0xcbf29ce484222325n;
+    const prime = 0x100000001b3n;
+    for (let i = 0; i < key.length; i += 1) {
+        hash ^= BigInt(key.charCodeAt(i));
+        hash = (hash * prime) & 0xffffffffffffffffn;
+    }
+    return hash.toString(36);
+}

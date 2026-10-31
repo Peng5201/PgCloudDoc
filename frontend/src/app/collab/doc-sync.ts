@@ -33,10 +33,13 @@ import * as awarenessProtocol from 'y-protocols/awareness';
 import * as encoding from 'lib0/encoding';
 import * as decoding from 'lib0/decoding';
 import { getAccessToken, refreshAccessToken } from '../api/client';
-import type { ICellData, ISelection, IWorkbookData, Worksheet } from '../spreadsheet/engine';
+import type { ICellData, ISelection, IStyleData, IWorkbookData, Worksheet } from '../spreadsheet/engine';
 import type { SheetEngine } from '../spreadsheet/engine';
 import type { ObjectArray } from '../spreadsheet/engine/model/object-matrix';
 import {
+    CELL_FIELDS,
+    COLUMN_FIELDS,
+    ROW_FIELDS,
     decodeCellKey,
     decodeIndexKey,
     encodeCellKey,
@@ -44,6 +47,7 @@ import {
     materialize,
     ROOT_META,
     ROOT_SHEETS,
+    ROOT_STYLES,
 } from './doc-shape';
 
 /** 与 y-websocket / 后端一致的消息类型 */
@@ -173,6 +177,13 @@ export class DocSync {
         this.doc.getMap(ROOT_META).observe((event) => {
             if (event.transaction.origin === LOCAL_ORIGIN) return;
             this.options.onStructureChange?.();
+        });
+
+        // 共享样式表变化：远端新增的样式要补进本地 workbook。
+        // 少了这一步，单元格的 s 指向一个本地不存在的 id，样式就丢了。
+        this.doc.getMap<unknown>(ROOT_STYLES).observe((event) => {
+            if (event.transaction.origin === LOCAL_ORIGIN) return;
+            this.applyRemoteStyles(event);
         });
 
         // 本地编辑 → 产生 update → 发给服务端，服务端再广播给其他协作者
@@ -347,9 +358,13 @@ export class DocSync {
     /** 把 sheets 数组里的每张表的三个 Y.Map 建立索引 + 挂 observer */
     private indexSheets(): void {
         const sheets = this.doc.getArray<Y.Map<unknown>>(ROOT_SHEETS);
+        const alive = new Set<string>();
+
         for (const sheet of sheets.toArray()) {
             const sheetId = sheet.get('id');
-            if (typeof sheetId !== 'string' || this.sheetMaps.has(sheetId)) continue;
+            if (typeof sheetId !== 'string') continue;
+            alive.add(sheetId);
+            if (this.sheetMaps.has(sheetId)) continue;
 
             const cellData = sheet.get('cellData') as Y.Map<unknown> | undefined;
             const rowData = sheet.get('rowData') as Y.Map<unknown> | undefined;
@@ -358,9 +373,18 @@ export class DocSync {
 
             this.sheetMaps.set(sheetId, { sheet, cellData, rowData, columnData });
 
+            // 表级元信息（名字等）是 sheet Y.Map 上的标量键，不会触发 sheets 数组的
+            // observer —— 数组 observer 只管增删表，必须在这里单独观察。
+            sheet.observe((event) => this.onRemoteSheetChange(sheetId, event));
+
             cellData.observe((event) => this.onRemoteCellChange(sheetId, event));
             rowData.observe((event) => this.onRemoteIndexChange(sheetId, event, 'row'));
             columnData.observe((event) => this.onRemoteIndexChange(sheetId, event, 'column'));
+        }
+
+        // 远端删表后清掉索引，避免残留（新表若复用同 id 会被 has() 挡住）
+        for (const sheetId of [...this.sheetMaps.keys()]) {
+            if (!alive.has(sheetId)) this.sheetMaps.delete(sheetId);
         }
     }
 
@@ -377,6 +401,63 @@ export class DocSync {
     }
 
     // ─────────────────────────── 远端 → 本地 ───────────────────────────
+
+    /**
+     * 远端共享样式变化 → 补进本地 workbook。
+     *
+     * 样式只增不删：删掉一个仍被 cell.s 引用的样式会让格子直接失色，
+     * 所以删除动作在这里直接忽略。
+     */
+    private applyRemoteStyles(event: Y.YMapEvent<unknown>): void {
+        const engine = this.engine;
+        if (!engine) return;
+
+        let touched = false;
+        for (const [id, change] of event.changes.keys) {
+            if (change.action === 'delete') continue;
+            const style = event.target.get(id);
+            if (style && typeof style === 'object') {
+                engine.workbook.addStyle(id, style as IStyleData);
+                touched = true;
+            }
+        }
+        if (touched) engine.notifyExternalChange();
+    }
+
+    /**
+     * 远端改了表级元信息（名字 / tabColor / hidden）。
+     *
+     * 这类改动落在 sheet Y.Map 的**标量键**上，不会触发 sheets 数组的 observer，
+     * 所以必须单独观察每张表。数组 observer 只负责增删表。
+     */
+    private onRemoteSheetChange(sheetId: string, event: Y.YMapEvent<unknown>): void {
+        if (event.transaction.origin === LOCAL_ORIGIN) return;
+        const engine = this.engine;
+        if (!engine) return;
+        const worksheet = engine.workbook.getSheet(sheetId);
+        if (!worksheet) return;
+
+        let changed = false;
+        for (const key of event.changes.keys.keys()) {
+            const value = event.target.get(key);
+            if (key === 'name') {
+                if (typeof value === 'string') {
+                    worksheet.name = value;
+                    changed = true;
+                }
+            } else if (key === 'tabColor') {
+                if (typeof value === 'string') {
+                    worksheet.tabColor = value;
+                    changed = true;
+                }
+            } else if (key === 'hidden') {
+                worksheet.hidden = value === 1 ? 1 : 0;
+                changed = true;
+            }
+        }
+
+        if (changed) engine.notifySheetMetaChange();
+    }
 
     private onRemoteCellChange(
         sheetId: string,
@@ -476,10 +557,38 @@ export class DocSync {
             onColumnChange: (sheetId, index, next, before) => {
                 this.pushIndex(this.columnMapFor(sheetId), index, next, before);
             },
+            onSheetAdd: (sheet, index) => {
+                this.pushSheetAdd(sheet, index);
+            },
+            onSheetRemove: (sheetId) => {
+                this.pushSheetRemove(sheetId);
+            },
+            onSheetRename: (sheetId, name) => {
+                this.pushSheetRename(sheetId, name);
+            },
         });
+
+        // 本地新样式 → 写进共享样式表。没有这一步，工具栏改样式只同步了
+        // cell.s（id），别人手里没有对应样式，看起来就是「操作没同步」。
+        engine.workbook.onStyleRegister = (id, style) => this.pushStyle(id, style);
+
+        // 防御性补齐：样式可能在引擎就绪前就到达（engine 为 null 时 observer 会跳过）
+        for (const [id, style] of this.doc.getMap<unknown>(ROOT_STYLES).entries()) {
+            if (style && typeof style === 'object') {
+                engine.workbook.addStyle(id, style as IStyleData);
+            }
+        }
+
+        // 同理补齐表名（重命名可能发生在引擎构建与 attach 之间）
+        for (const [sheetId, maps] of this.sheetMaps) {
+            const name = maps.sheet.get('name');
+            const worksheet = engine.workbook.getSheet(sheetId);
+            if (worksheet && typeof name === 'string') worksheet.name = name;
+        }
     }
 
     detach(): void {
+        if (this.engine) this.engine.workbook.onStyleRegister = null;
         this.engine?.attachChangeHooks(null);
         this.engine = null;
     }
@@ -542,6 +651,64 @@ export class DocSync {
                     map.set(key, cloneJson(value));
                 }
             }
+        }, LOCAL_ORIGIN);
+    }
+
+    /**
+     * 新样式 → Y.Doc 的共享样式表。
+     *
+     * id 是内容寻址的（`sh<hash>`），两端对同一份样式算出的 id 一致，
+     * 所以「先到先写」没有冲突；已经存在就不重复写。
+     */
+    private pushStyle(id: string, style: IStyleData): void {
+        const styles = this.doc.getMap<unknown>(ROOT_STYLES);
+        if (styles.get(id) !== undefined) return;
+        this.doc.transact(() => {
+            styles.set(id, cloneJson(style));
+        }, LOCAL_ORIGIN);
+    }
+
+    // ─────────────────────────── 结构性改动（增删 / 重命名 sheet）───────────────────────────
+
+    /**
+     * 本地新建 sheet → 在 Y.Doc 的 sheets 数组里插入同样的结构。
+     *
+     * `index` 来自引擎（本地已加好），并发下 Y.Array 可能已变过，这里夹紧到合法范围。
+     * LOCAL_ORIGIN 不会触发数组 observer，所以要手动 `indexSheets()`，
+     * 让新表的 cell/row/column 增量也能同步。
+     */
+    private pushSheetAdd(sheet: Worksheet, index: number): void {
+        const sheets = this.doc.getArray<Y.Map<unknown>>(ROOT_SHEETS);
+        const map = buildSheetYMap(sheet);
+        this.doc.transact(() => {
+            const at = Math.min(Math.max(index, 0), sheets.length);
+            sheets.insert(at, [map]);
+        }, LOCAL_ORIGIN);
+        this.indexSheets();
+    }
+
+    /** 本地删除 sheet → 从 Y.Doc 的 sheets 数组删掉 */
+    private pushSheetRemove(sheetId: string): void {
+        const sheets = this.doc.getArray<Y.Map<unknown>>(ROOT_SHEETS);
+        const at = findSheetIndex(sheets, sheetId);
+        if (at < 0) return;
+
+        // 先摘索引：这张表不再需要增量观察
+        this.sheetMaps.delete(sheetId);
+        this.doc.transact(() => {
+            sheets.delete(at, 1);
+        }, LOCAL_ORIGIN);
+    }
+
+    /** 本地重命名 sheet → 改 Y.Doc 里对应表的名字 */
+    private pushSheetRename(sheetId: string, name: string): void {
+        const sheets = this.doc.getArray<Y.Map<unknown>>(ROOT_SHEETS);
+        const at = findSheetIndex(sheets, sheetId);
+        if (at < 0) return;
+        const sheet = sheets.get(at);
+        if (!sheet) return;
+        this.doc.transact(() => {
+            sheet.set('name', name);
         }, LOCAL_ORIGIN);
     }
 
@@ -736,4 +903,102 @@ export function collabColor(id: string): string {
     let hash = 0;
     for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) | 0;
     return palette[Math.abs(hash) % palette.length];
+}
+
+// ─────────────────────────── 工作表结构 ───────────────────────────
+
+/** 在 sheets 数组里按 id 找下标 */
+function findSheetIndex(sheets: Y.Array<Y.Map<unknown>>, sheetId: string): number {
+    const list = sheets.toArray();
+    for (let i = 0; i < list.length; i += 1) {
+        if (list[i].get('id') === sheetId) return i;
+    }
+    return -1;
+}
+
+/**
+ * 引擎的 Worksheet → doc-shape 约定的 Y.Map 结构。
+ *
+ * 新建表一般是空的，但这里按完整结构生成，将来「复制表」可以直接复用。
+ * 必须在挂进 doc 之前把内容写完（未归属 doc 的 Y.Map 读自己的内容是 undefined）。
+ */
+function buildSheetYMap(sheet: Worksheet): Y.Map<unknown> {
+    const map = new Y.Map<unknown>();
+    map.set('id', sheet.id);
+    map.set('name', sheet.name);
+    map.set('tabColor', sheet.tabColor);
+    map.set('hidden', sheet.hidden);
+    map.set('rowCount', sheet.rowCount);
+    map.set('columnCount', sheet.columnCount);
+    map.set('zoomRatio', sheet.zoomRatio);
+    map.set('scrollTop', sheet.scrollTop);
+    map.set('scrollLeft', sheet.scrollLeft);
+    map.set('defaultRowHeight', sheet.defaultRowHeight);
+    map.set('defaultColumnWidth', sheet.defaultColumnWidth);
+    map.set('showGridlines', sheet.showGridlines);
+    map.set('gridlinesColor', sheet.gridlinesColor);
+
+    const freeze = new Y.Map<unknown>();
+    freeze.set('xSplit', sheet.freeze.xSplit);
+    freeze.set('ySplit', sheet.freeze.ySplit);
+    freeze.set('startRow', sheet.freeze.startRow);
+    freeze.set('startColumn', sheet.freeze.startColumn);
+    map.set('freeze', freeze);
+
+    const rowHeader = new Y.Map<unknown>();
+    rowHeader.set('width', sheet.rowHeaderWidth);
+    rowHeader.set('hidden', 0);
+    map.set('rowHeader', rowHeader);
+
+    const columnHeader = new Y.Map<unknown>();
+    columnHeader.set('height', sheet.columnHeaderHeight);
+    columnHeader.set('hidden', 0);
+    map.set('columnHeader', columnHeader);
+
+    const cellData = new Y.Map<unknown>();
+    sheet.cellData.forEach((row, column, cell) => {
+        const record = cell as unknown as Record<string, unknown>;
+        for (const field of CELL_FIELDS) {
+            const value = record[field];
+            if (value !== undefined && value !== null) {
+                cellData.set(encodeCellKey(row, column, field), cloneJson(value));
+            }
+        }
+    });
+    map.set('cellData', cellData);
+
+    const rowData = new Y.Map<unknown>();
+    sheet.rowData.forEach((index, meta) => {
+        const record = meta as unknown as Record<string, unknown>;
+        for (const field of ROW_FIELDS) {
+            const value = record[field];
+            if (value !== undefined && value !== null) {
+                rowData.set(encodeIndexKey(index, field), cloneJson(value));
+            }
+        }
+    });
+    map.set('rowData', rowData);
+
+    const columnData = new Y.Map<unknown>();
+    sheet.columnData.forEach((index, meta) => {
+        const record = meta as unknown as Record<string, unknown>;
+        for (const field of COLUMN_FIELDS) {
+            const value = record[field];
+            if (value !== undefined && value !== null) {
+                columnData.set(encodeIndexKey(index, field), cloneJson(value));
+            }
+        }
+    });
+    map.set('columnData', columnData);
+
+    const mergeData = new Y.Map<unknown>();
+    for (const merge of sheet.mergeData) {
+        mergeData.set(
+            `${merge.startRow}:${merge.startColumn}:${merge.endRow}:${merge.endColumn}`,
+            cloneJson(merge)
+        );
+    }
+    map.set('mergeData', mergeData);
+
+    return map;
 }
