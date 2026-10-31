@@ -57,19 +57,20 @@ Kafka (producer/consumer) <── 事件总线 ───────────
 ```
 src/
   config/          环境变量 zod 校验 + 分层配置 + AppConfigService
-  common/          横切：中间件 / 异常过滤器 / 拦截器 / Guard / 装饰器 / 统一错误码
-  infra/
+  shared/          横切：中间件 / 异常过滤器 / 拦截器 / Guard / 装饰器 / 统一错误码 / 请求上下文
+  infrastructure/  外部系统适配（端口实现）
     prisma/        PrismaService（driver adapter + 显式连接池）
     redis/         缓存(含穿透/击穿/雪崩) + 限流 + 分布式锁 + Pub/Sub
-    kafka/         生产者 / 消费者管理 / 事件契约 / 幂等
+    kafka/         生产者 / 消费者 / 事务性发件箱 / 事件契约 / 幂等
     yjs/           Y.Doc 结构、materialize/applySnapshot、update 日志持久化
-  modules/
+  features/        业务能力（垂直切片）
     auth/          注册 登录 刷新 登出 + 双 token + OAuth2
     users/         资料
-    documents/     CRUD + 快照 + 版本历史/回滚
-      formats/     工作簿文件格式（xlsx 读写，按扩展名分发，可扩展 csv 等）
+    documents/     CRUD + 快照 + 版本历史/回滚 + 成员权限/申请 + 导入导出
+      formats/     工作簿文件格式注册表（xlsx 读写；加 csv 只需实现 WorkbookFormat）
     collab/        WebSocket 协同服务（y-protocols sync + awareness）
-    jobs/          Kafka 消费者（归档/审计）+ cron 清理
+    jobs/          Kafka 消费者（归档/审计/死信）+ cron 清理
+    notifications/ 站内信 + WS 推送
     health/        liveness / readiness / 依赖详情
 test/              单元测试在 src/ 里随模块；冒烟脚本在 test/
 ```
@@ -88,7 +89,7 @@ test/              单元测试在 src/ 里随模块；冒烟脚本在 test/
 ```
 
 客户端按 `code` 分支，不按 `message`（message 会被翻译/改写，code 是契约）。
-完整错误码见 [src/common/errors/app-error.ts](src/common/errors/app-error.ts)。
+完整错误码见 [src/shared/errors/app-error.ts](src/shared/errors/app-error.ts)。
 
 ### 认证 `POST /api/v1/auth`
 
@@ -100,8 +101,17 @@ test/              单元测试在 src/ 里随模块；冒烟脚本在 test/
 | POST | `/logout` | 吊销整族 token + 拉黑 access token |
 | GET | `/me` | 当前用户 |
 | POST | `/change-password` | 改密码（自动吊销所有会话） |
+| POST | `/profile` | 更新当前用户资料 |
 | GET | `/oauth/:provider` | 取第三方授权链接 |
 | GET | `/oauth/:provider/callback` | OAuth2 回调 |
+
+### 用户 `/api/v1/users`
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/me` | 当前用户资料 |
+| GET | `/:id` | 其他用户的公开资料（需登录，ETag + `max-age=60`） |
+| POST | `/me` | 更新资料 |
 
 ### 文档 `/api/v1/documents`
 
@@ -109,6 +119,8 @@ test/              单元测试在 src/ 里随模块；冒烟脚本在 test/
 |---|---|---|
 | GET | `/` | 游标分页列表（`cursor` / `limit` / `keyword` / `status`） |
 | POST | `/` | 新建 |
+| POST | `/import` | **导入工作簿**（multipart `file`，≤20MB，格式由 `formats/` 注册表决定），导入即新建文档 |
+| GET | `/:id/export.xlsx` | **导出工作簿**（二进制流，不走统一信封） |
 | GET | `/:id` | 详情 |
 | PATCH | `/:id` | 改名 / 描述 / 归档状态 |
 | DELETE | `/:id` | 软删除 |
@@ -118,12 +130,57 @@ test/              单元测试在 src/ 里随模块；冒烟脚本在 test/
 | GET | `/:id/versions` | 版本列表 |
 | POST | `/:id/versions/:v/restore` | 回滚到某版本 |
 | POST | `/:id/refresh-snapshot` | 异步触发归档（走 Kafka，返回 202） |
+| GET | `/:id/members` | 协作者列表 |
+| PATCH | `/:id/members/:userId` | 调整成员角色 |
+| DELETE | `/:id/members/:userId` | 移除成员 |
+| POST | `/:id/access-requests` | 申请访问权限 |
+| GET | `/:id/access-requests` | 待审批申请 |
+| POST | `/:id/access-requests/:requestId/approve` | 通过申请（指定角色） |
+| POST | `/:id/access-requests/:requestId/reject` | 拒绝申请 |
+
+### 通知 `/api/v1/notifications`
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/` | 通知列表 |
+| GET | `/unread-count` | 未读数 |
+| POST | `/read` | 标记指定通知已读（`ids`） |
+| POST | `/read-all` | 全部标记已读 |
 
 ### 其它
 
 - `GET /health` · `GET /health/ready` · `GET /health/deps`
 - `WS  ws://host/collab/:documentId?access_token=...` —— 协同入口，协议与 [y-websocket](https://github.com/yjs/y-websocket) 完全兼容，前端可直接用 `WebsocketProvider`
-- `GET /api/testSheet` —— 旧接口，留给前端现有代码，下一轮切到 `/api/v1/documents/:id/snapshot` 后可删
+- `WS  ws://host/notifications?access_token=...` —— 用户级通知推送（纯 JSON 文本帧，客户端只收；已读走 REST）
+
+---
+
+## 工作簿导入导出
+
+格式层是一个**可扩展注册表**，不在 controller 里写死 xlsx：
+
+| 位置 | 职责 |
+|---|---|
+| [formats/types.ts](src/features/documents/formats/types.ts) | `WorkbookFormat` 契约：`extensions` / `contentType` / `read()` / `write()` |
+| [formats/index.ts](src/features/documents/formats/index.ts) | 注册表 + 按扩展名分发（`readWorkbook` / `writeWorkbook`） |
+| [formats/xlsx/](src/features/documents/formats/xlsx/) | xlsx 实现（ExcelJS） |
+
+加一种格式（如 csv / ods）只需新建 `formats/<id>/`、实现 `WorkbookFormat`、在 `FORMATS` 里登记一行；
+导入/导出调用方不用改。
+
+**流程**
+
+- **导入**：`POST /api/v1/documents/import` → 按文件名分发 → `readXlsx` → `applySnapshot` 写入 Y.Doc → 归档 → 返回新文档详情
+- **导出**：`GET /api/v1/documents/:id/export.xlsx` → `materialize` 读服务端 Y.Doc → `writeXlsx` → 二进制流
+
+以服务端 Y.Doc 为导出真源，客户端手里的数据可能落后于别人的实时编辑。
+
+**体量与降级**
+
+- 上传 20MB（`MAX_XLSX_BYTES`）；单元格 200 万（`MAX_IMPORT_CELLS`），超限 413
+- 解析在请求线程同步执行；更大体量应改为异步队列 + 任务状态查询
+- 富文本压平、超链接只留文本等降级会写进 `warnings` 并记录日志（当前不返回给客户端）
+- 逐类型边界见 [formats/xlsx/DATA-TYPES.md](src/features/documents/formats/xlsx/DATA-TYPES.md)，实现取舍见 [formats/xlsx/README.md](src/features/documents/formats/xlsx/README.md)
 
 ---
 
@@ -153,7 +210,7 @@ test/              单元测试在 src/ 里随模块；冒烟脚本在 test/
 > 字段名编进 key 之后，`0:0:v` 和 `0:0:s` 是两个不同的 map 条目，不存在冲突。
 > 同一字段的并发编辑才走 LWW —— 这正是想要的粒度。
 
-这条被 [ydoc.spec.ts](src/infra/yjs/ydoc.spec.ts) 的「并发合并语义」用例钉住了，改坏会立刻红。
+这条被 [ydoc.spec.ts](src/infrastructure/yjs/ydoc.spec.ts) 的「并发合并语义」用例钉住了，改坏会立刻红。
 
 ### 持久化：update 追加日志 + compaction
 
@@ -170,7 +227,7 @@ test/              单元测试在 src/ 里随模块；冒烟脚本在 test/
 |---|---|
 | 文档快照 | `private, max-age=0, must-revalidate` + ETag（内容哈希）→ 命中 304，一个字节不传 |
 | 文档详情 | `private + must-revalidate`，自动 ETag |
-| 用户资料 | `private, max-age=60` |
+| 用户资料 | 公开资料页 `GET /users/:id`：`public, max-age=60` + 自动 ETag |
 | 文档列表 | 不缓存 |
 
 几 MB 的快照是最值钱的一处优化：重复打开同一个文档不再传 body。
@@ -185,38 +242,55 @@ test/              单元测试在 src/ 里随模块；冒烟脚本在 test/
 
 ### 消息队列
 
-| topic | 用途 |
-|---|---|
-| `doc.snapshot.requested` | 触发异步归档（写路径不被「物化 + gzip + 写库」拖慢） |
-| `doc.snapshot.completed` | 归档完成通知 |
-| `doc.update.persisted` | 变更审计 |
-| `audit.user.activity` | 用户行为审计 |
+| topic | 用途 | 生产方式 |
+|---|---|---|
+| `doc.snapshot.requested` | 触发异步归档（写路径不被「物化 + gzip + 写库」拖慢） | 发件箱 |
+| `doc.snapshot.completed` | 归档完成通知 | 与版本写入**同事务** |
+| `doc.update.persisted` | 变更审计（契约预留） | — |
+| `audit.user.activity` | 用户行为审计 | 发件箱 |
+| `pgclouddoc.dead-letter` | 重试耗尽的事件 | 发件箱 |
 
-消费端三件事：`processed_events` 表保证**幂等**（at-least-once 会重复投递）、
-`eachBatchAutoResolve: false` 手动提交（自动提交会在中途崩溃时丢消息）、
-指数退避重试 + 死信 topic（一条坏消息不能卡死整个 consumer group）。
+**生产端：事务性发件箱（Outbox）**
+
+- 业务代码不直接发 Kafka，先写 `outbox_events`；需要时传入业务事务，做到「业务提交了，事件一定留下」
+- `OutboxDispatcher` 每秒认领 PENDING 记录投递；`FOR UPDATE SKIP LOCKED` 保证多实例不重复领取
+- 失败指数退避，超过 10 次标记 `FAILED`（人工介入）；Kafka 不可用时事件留在表里，恢复后自动补发
+- 启动时 Kafka 没起来也没关系：生产者与消费者都会周期性 `ensureConnected`，恢复后自动接上
+- Kafka 生产者幂等（`idempotent: true`）+ `acks=-1`
+
+**消费端**
+
+- `processed_events` 表保证幂等：**先只读检查，处理成功后再写标记**。
+  先标记再处理的话，处理到一半进程崩溃，重投时会被误判为已处理而**永久丢消息**
+- 审计落库额外用事件 id 唯一索引兜底：同一条消息重复投递只落一条
+- `eachBatchAutoResolve: false` 手动提交；指数退避重试 + 死信 topic，一条坏消息不卡死 consumer group
+- **死信有消费者**：落到 `audit_logs`（`action = kafka.dead_letter`），不会成为没人看的黑洞；死信自身失败时不再套娃
+- 事件信封带 `schemaVersion` 与 `correlationId`；消费时把 `correlationId` 灌进请求上下文，日志能和 HTTP 请求串起来
+- 发件箱与幂等表由 cron 定期清理（已投递 7 天 / 失败 30 天 / 幂等记录 7 天）
 
 ### 缓存层（Redis）
 
 | 场景 | 结构 | 策略 |
 |---|---|---|
-| 文档元信息 | String | Cache-Aside，写后 `DEL` |
-| 用户资料 | Hash | Read-Through |
-| 在线协作者 | ZSet(心跳时间戳) | 心跳续期 |
+| 文档元信息 | String(JSON) | Cache-Aside，写后 `DEL` |
+| 用户资料 | String(JSON) | `getOrSet`：空值缓存 + 互斥锁 + TTL 抖动 |
 | access token 黑名单 | String | TTL = token 剩余寿命 |
+| OAuth state | String | 5 分钟 TTL |
+| 令牌族吊销 | Set | 重放检测时整族拉黑 |
 | 分布式锁 | String(SET NX PX) + Lua | 归档 / compaction 互斥 |
 | 限流计数 | ZSet | **滑动窗口**（不是固定窗口 —— 固定窗口在边界会放行 2 倍流量） |
 | 变更流水 | Stream | 调试回放 |
 
-三类缓存问题都处理：穿透（空值缓存 + 布隆）、击穿（互斥锁 + 逻辑过期）、雪崩（TTL ±20% 抖动）。
+三类缓存问题都处理：穿透（空值缓存）、击穿（互斥锁 + 短轮询）、雪崩（TTL ±20% 抖动）。
 **Redis 挂了系统要能继续跑** —— 所有命令 `safe()` 包装，失败降级直读 PG。
 
 ---
 
 ## 测试
 
-**单元测试**（`pnpm test`，24 用例，不需要任何外部服务）
-覆盖 Yjs 结构的往返一致性与并发合并语义、双 token 的签发/校验/哈希。
+**单元测试**（`pnpm test`，32 用例，不需要任何外部服务）
+覆盖 Yjs 结构的往返一致性与并发合并语义（13）、双 token 的签发/校验/哈希（11）、
+xlsx 往返/样式去重/共享公式/单元格上限（8）。
 
 **冒烟脚本**（`pnpm test:smoke`，打真实服务）
 - `test/http.smoke.mjs` —— 43 项：健康检查、注册登录、CRUD、ETag/304、版本回滚、越权 404、令牌轮换与重放检测、软删除
@@ -250,6 +324,10 @@ jest 30 在 Node 22 上的 `require()` 实现不支持 `require(esm)`，
 
 - 数据模型：[prisma/schema.prisma](prisma/schema.prisma)
 - 存储过程与视图：[prisma/migrations/20261027083138_init/migration.sql](prisma/migrations/20261027083138_init/migration.sql)
-- 统一错误码：[src/common/errors/app-error.ts](src/common/errors/app-error.ts)
-- CRDT 结构设计：[src/infra/yjs/ydoc.ts](src/infra/yjs/ydoc.ts)
-- 令牌轮换与重放检测：[src/modules/auth/auth.service.ts](src/modules/auth/auth.service.ts)
+- 统一错误码：[src/shared/errors/app-error.ts](src/shared/errors/app-error.ts)
+- CRDT 结构设计：[src/infrastructure/yjs/ydoc.ts](src/infrastructure/yjs/ydoc.ts)
+- 令牌轮换与重放检测：[src/features/auth/auth.service.ts](src/features/auth/auth.service.ts)
+- 事务性发件箱：[src/infrastructure/kafka/outbox.service.ts](src/infrastructure/kafka/outbox.service.ts)
+- 文件格式契约：[src/features/documents/formats/types.ts](src/features/documents/formats/types.ts)
+- xlsx 实现说明：[src/features/documents/formats/xlsx/README.md](src/features/documents/formats/xlsx/README.md)
+- xlsx 类型边界：[src/features/documents/formats/xlsx/DATA-TYPES.md](src/features/documents/formats/xlsx/DATA-TYPES.md)

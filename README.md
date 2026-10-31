@@ -17,6 +17,7 @@ PgCloudDoc 是一个**实时协同电子表格**：多个用户可以在浏览�
 | 实时协同 | 基于 CRDT（Yjs），多人同时编辑不丢字段、自动收敛 |
 | 在线状态 | 顶栏显示当前协作者头像与状态（awareness） |
 | 版本管理 | 手动/异步存档，版本历史可回滚 |
+| 文件互通 | 服务端解析/生成 `.xlsx`，导入即新建文档，导出以服务端 Y.Doc 为准 |
 | 账户体系 | 邮箱/用户名登录、注册，access + refresh 双 token |
 | 安全边界 | 行级权限（越权一律 404）、限流、审计、软删除 |
 
@@ -57,11 +58,10 @@ PgCloudDoc/
 ├── backend/          NestJS 服务端
 │   ├── prisma/       数据模型 + 迁移（含存储过程、视图）
 │   ├── src/
-│   │   ├── config/       环境变量 zod 校验 + 分层配置
-│   │   ├── common/       横切：中间件 / 异常过滤器 / 拦截器 / Guard / 装饰器 / 错误码
-│   │   ├── component/    工作表数据定义（IWorkbookData 示例，旧 /api/testSheet 用）
-│   │   ├── infra/        prisma · redis · kafka · yjs（外部系统适配）
-│   │   └── modules/      auth · users · documents（含 formats/ 工作簿文件格式） · collab · jobs · health
+│   │   ├── config/         环境变量 zod 校验 + 分层配置
+│   │   ├── shared/         横切：中间件 / 异常过滤器 / 拦截器 / Guard / 装饰器 / 错误码 / 请求上下文
+│   │   ├── infrastructure/  外部系统适配：prisma · redis · kafka（含事务性发件箱） · yjs
+│   │   └── features/       业务能力：auth · users · documents（含 formats/ 工作簿文件格式） · collab · jobs · notifications · health
 │   ├── kafka/        Kafka 单节点配置（开发用）
 │   ├── Dockerfile    多阶段构建：deps → build → prod-deps → migrator → runtime
 │   ├── test/         集成冒烟脚本
@@ -74,6 +74,7 @@ PgCloudDoc/
 │   │   ├── app/documents/    文档列表
 │   │   ├── app/editor/       编辑器页
 │   │   ├── app/collab/       CRDT 协同（Y.Doc ↔ 引擎双向桥）
+│   │   ├── app/notifications/ 通知中心（REST 历史 + WS 增量）
 │   │   ├── app/spreadsheet/  自研表格引擎（canvas 渲染 + 撤销重做）
 │   │   └── shared/           共享组件（如应用外壳 AppLayout）
 │   ├── Dockerfile    nginx + 静态产物
@@ -144,8 +145,8 @@ pnpm dev
 | 前端 (Vite) | **5173** | 浏览器访问入口，`/api` 和 `/collab` 代理到后端 |
 | 后端 (Nest) | **3000** | REST `/api/v1` + WebSocket `/collab/:docId` |
 | PostgreSQL | 5432 | 业务数据 |
-| Redis | 6379 | 缓存 / 限流 / 分布式锁 / 协同广播 |
-| Kafka | 9092 | 异步任务（归档、审计）；9094 仅供宿主机调试 |
+| Redis | 6379 | 缓存 / 限流 / 分布式锁 |
+| Kafka | 9092 | 异步任务（归档、审计）· 生产 compose 另在 `127.0.0.1:9094` 暴露宿主机调试端口 |
 
 ### 5.3 验证安装
 
@@ -227,8 +228,8 @@ docker exec pgclouddoc-prod-postgres-1 pg_dump -U pgclouddoc pgclouddoc | gzip >
 
 单机 Compose 能扛中小规模，但这几处是有意留的边界：
 
-- **Kafka 是单节点、副本因子 1** —— 挂了异步任务（归档/审计）会积压，主流程不受影响（`/health/ready` 里 Kafka 只算 degraded）。有高可用要求就换 3 节点集群或托管服务。
-- **Yjs 文档状态在进程内存 + PostgreSQL**，多实例之间靠 Redis 广播。要水平扩 backend，必须在前面加**按文档 id 粘性**的负载均衡，否则同一文档的 WebSocket 会落到不同实例。
+- **Kafka 是单节点、副本因子 1** —— 挂了异步任务（归档/审计）会积压，事件留在**事务性发件箱**里、恢复后自动补发，主流程不受影响（`/health/ready` 里 Kafka 只算 degraded）。有高可用要求就换 3 节点集群或托管服务。
+- **Yjs 文档状态在进程内存 + PostgreSQL**，广播也在进程内完成。要水平扩 backend，必须在前面加**按文档 id 粘性**的负载均衡，否则同一文档的 WebSocket 会落到不同实例、各自维护一份房间。
 - **迁移是发版的一部分**，不是自动常驻任务 —— 这样才能保证每次都能应用新迁移，但也意味着不能直接 `docker compose up -d` 绕过 `deploy.mjs` 发版。
 
 ---
@@ -306,7 +307,7 @@ docker exec pgclouddoc-prod-postgres-1 pg_dump -U pgclouddoc pgclouddoc | gzip >
 | 前端协同 | Yjs + y-protocols | 客户端 CRDT 文档、WebSocket 同步 |
 | 后端 | NestJS 12（纯 ESM）· TypeScript | REST + WebSocket 服务 |
 | 数据 | PostgreSQL 16 · Prisma 7（driver adapter） | 业务数据、迁移、存储过程/视图 |
-| 缓存/协同 | Redis 7（ioredis） | 缓存、限流、分布式锁、Pub/Sub 广播 |
+| 缓存/协同 | Redis 7（ioredis） | 缓存、限流、分布式锁（另封装 Pub/Sub 事件总线） |
 | 消息 | Kafka 3.9（kafkajs） | 异步归档、审计 |
 | 部署 | Docker Compose · nginx | 单机容器化、同源反代 |
 
@@ -321,7 +322,7 @@ nginx (静态托管 + 同源反代，唯一对外入口)
 NestJS 后端
    │  Guards / Filters / Interceptors → Controller → Service → Repository
    ├── Prisma ──────────► PostgreSQL
-   ├── ioredis ─────────► Redis（缓存 / 限流 / 锁 / 广播）
+   ├── ioredis ─────────► Redis（缓存 / 限流 / 锁）
    ├── Yjs Y.Doc ───────► document_updates（append-only 日志）
    └── Kafka 事件总线 ──► jobs（归档 / 审计，幂等消费）
 ```
@@ -336,13 +337,13 @@ NestJS 后端
 
 **持久化：update 追加日志 + compaction** —— 只追加几十字节的 update，而不是整份几 MB 快照；超阈值（默认 200 条）把 N 条合并成 base update 做 checkpoint。持久化挂在 Y.Doc 上而非连接上，无连接时（回滚、cron 归档）也能落库。
 
-**HTTP 缓存** —— 文档快照用 `private + must-revalidate` + ETag（内容哈希）命中 304；文档详情自动 ETag；用户资料 `max-age=60`；列表不缓存。几 MB 的快照重复打开不再传 body。
+**HTTP 缓存** —— 文档快照用 `private + must-revalidate` + ETag（内容哈希）命中 304；文档详情自动 ETag；公开资料页 `max-age=60`；列表不缓存。几 MB 的快照重复打开不再传 body。
 
 **行级安全** —— 每个接口第一步 `assertAccess`，越权返回 **404 而非 403**，避免「凭 id 枚举他人文档」。鉴权必须在缓存**之前**。
 
-**消息队列** —— 消费端 `processed_events` 表保证幂等、`eachBatchAutoResolve: false` 手动提交、指数退避 + 死信 topic，一条坏消息不卡死整个 consumer group。
+**消息队列** —— 生产端走**事务性发件箱**（业务与事件同事务，Kafka 不可用不丢事件，恢复后自动补发）；消费端 `processed_events` 表保证幂等（**处理成功后才标记**）、`eachBatchAutoResolve: false` 手动提交、指数退避 + 死信 topic，死信落审计表可排查，一条坏消息不卡死整个 consumer group。
 
-**缓存层（Redis）** —— Cache-Aside / Read-Through / 滑动窗口限流 / 分布式锁等结构齐全；穿透（空值缓存 + 布隆）、击穿（互斥锁 + 逻辑过期）、雪崩（TTL 抖动）都处理；Redis 挂了通过 `safe()` 包装降级直读 PG。
+**缓存层（Redis）** —— Cache-Aside（`getOrSet` 读穿）/ 滑动窗口限流 / 分布式锁等结构齐全；穿透（空值缓存）、击穿（互斥锁 + 短轮询）、雪崩（TTL ±20% 抖动）都处理；Redis 挂了通过 `safe()` 包装降级直读 PG。
 
 **Excel 导入导出** —— 解析与生成都在服务端（ExcelJS），导入 = 解析 → `applySnapshot` 写入 Y.Doc → 归档；导出 = 基于服务端 Y.Doc 生成文件流。能力概览见 7.4。
 
@@ -351,7 +352,7 @@ NestJS 后端
 ### 7.4 导入导出的数据类型能力
 
 数据类型边界
-见 [backend/src/modules/documents/formats/xlsx/DATA-TYPES.md](backend/src/modules/documents/formats/xlsx/DATA-TYPES.md)，这里只列概览：
+见 [backend/src/features/documents/formats/xlsx/DATA-TYPES.md](backend/src/features/documents/formats/xlsx/DATA-TYPES.md)，这里只列概览：
 
 - **单元格值**：文本、数字、布尔、日期、公式、错误值、富文本、超链接、空单元格、合并区从属格
 - **数字格式**：支持整数 / 小数 / 千分位 / 百分比 / 日期 / 时间 / 字面量；降级项：货币符号字面量被丢弃、科学计数不准确、多段格式只取第一段
@@ -360,6 +361,20 @@ NestJS 后端
 - **明确不支持**：图表、图片、条件格式、数据验证、批注、透视表、命名区域、宏、`.xls`、1904 日期系统
 - **体量约束**：单次上传 20MB / 单元格 200 万 / 解析在请求线程同步执行
 - **显示层优先级**：`cellText` 依次取 公式原文 → 空串 → `TRUE/FALSE` → 按数字格式渲染 → `String(v)`
+
+### 7.5 文件导入导出
+
+服务端负责解析与生成，前端只上传/下载：
+
+| 动作 | 接口 | 流程 |
+| --- | --- | --- |
+| 导入 | `POST /api/v1/documents/import`（multipart `file`） | 按扩展名分发 → `readXlsx` → `applySnapshot` 写入 Y.Doc → 归档 → 返回新文档 |
+| 导出 | `GET /api/v1/documents/:id/export.xlsx` | `materialize` 读服务端 Y.Doc → `writeXlsx` → 二进制流 |
+
+- 导入**总是新建文档**，解析失败不会影响任何现有文档
+- 导出以服务端 Y.Doc 为真源，不受客户端本地状态落后影响
+- 格式层是可扩展注册表：新增 csv / ods 只需实现 `WorkbookFormat` 并在 `formats/index.ts` 登记
+- 取舍与实现细节见 [backend/README.md 的工作簿导入导出](backend/README.md#工作簿导入导出)，逐类型边界见 [DATA-TYPES.md](backend/src/features/documents/formats/xlsx/DATA-TYPES.md)
 
 ---
 

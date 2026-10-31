@@ -5,28 +5,25 @@ import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 
 import { AppConfigModule } from './config/config.module';
 import { AppConfigService } from './config/app-config.service';
-import { PrismaModule } from './infra/prisma/prisma.module';
-import { RedisModule } from './infra/redis/redis.module';
-import { KafkaModule } from './infra/kafka/kafka.module';
-import { YjsModule } from './infra/yjs/yjs.module';
+import { PrismaModule } from './infrastructure/prisma/prisma.module';
+import { RedisModule } from './infrastructure/redis/redis.module';
+import { KafkaModule } from './infrastructure/kafka/kafka.module';
+import { YjsModule } from './infrastructure/yjs/yjs.module';
 
-import { RequestIdMiddleware } from './common/middleware/request-id.middleware';
-import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
-import { ResponseInterceptor } from './common/interceptors/response.interceptor';
-import { HttpCacheInterceptor } from './common/interceptors/http-cache.interceptor';
-import { RateLimitGuard } from './common/guards/rate-limit.guard';
+import { RequestIdMiddleware } from './shared/middleware/request-id.middleware';
+import { AllExceptionsFilter } from './shared/filters/all-exceptions.filter';
+import { ResponseInterceptor } from './shared/interceptors/response.interceptor';
+import { HttpCacheInterceptor } from './shared/interceptors/http-cache.interceptor';
+import { RateLimitGuard } from './shared/guards/rate-limit.guard';
 
-import { AuthModule } from './modules/auth/auth.module';
-import { JwtAuthGuard } from './modules/auth/jwt-auth.guard';
-import { UsersModule } from './modules/users/users.module';
-import { DocumentsModule } from './modules/documents/documents.module';
-import { CollabModule } from './modules/collab/collab.module';
-import { JobsModule } from './modules/jobs/jobs.module';
-import { HealthModule } from './modules/health/health.module';
-import { NotificationsModule } from './modules/notifications/notifications.module';
-
-import { AppController } from './app.controller';
-import { AppService } from './app.service';
+import { AuthModule } from './features/auth/auth.module';
+import { JwtAuthGuard } from './features/auth/jwt-auth.guard';
+import { UsersModule } from './features/users/users.module';
+import { DocumentsModule } from './features/documents/documents.module';
+import { CollabModule } from './features/collab/collab.module';
+import { JobsModule } from './features/jobs/jobs.module';
+import { HealthModule } from './features/health/health.module';
+import { NotificationsModule } from './features/notifications/notifications.module';
 
 @Module({
     imports: [
@@ -116,10 +113,8 @@ import { AppService } from './app.service';
         HealthModule,
         NotificationsModule,
     ],
-    controllers: [AppController],
+    controllers: [],
     providers: [
-        AppService,
-
         // 全局异常过滤器 —— 最后一道兜底
         { provide: APP_FILTER, useClass: AllExceptionsFilter },
 

@@ -19,32 +19,36 @@ render 层没有自己独立的启动入口，它由 `SheetEngine` 在构造时�
 ```text
 SheetView (React 组件)
    │  渲染画布容器 <div ref={containerRef}>
-   │  useSheetEngine(containerRef, snapshot)          SheetView.tsx:30
+   │  useSheetEngine(containerRef, snapshot, readOnly)   SheetView.tsx:32
    ▼
 useSheetEngine hook
-   │  new SheetEngine({ container, snapshot })        useSheetEngine.ts:51
+   │  new SheetEngine({ container, snapshot, readOnly }) useSheetEngine.ts:65
    ▼
 SheetEngine 构造函数
-   │  new Renderer(container)                          index.ts:189  ← 入口
-   │  renderer.skeleton / worksheet / styles / zoom = …  index.ts:207
-   │  renderer.getSelection = …                        index.ts:248
-   │  renderer.invalidate()  ← 触发第一帧              index.ts:253
+   │  new Renderer(container)                            index.ts:209  ← 入口
+   │  renderer.skeleton / worksheet / styles / zoom = …  index.ts:227-230
+   │  renderer.getSelection = …                          index.ts:268
+   │  ResizeObserver → renderer.invalidate()             index.ts:271
+   │  renderer.invalidate()  ← 触发第一帧                index.ts:274
    ▼
 Renderer (renderer.ts)
-   │  createElement('canvas') 挂到 container           renderer.ts:71
-   │  invalidate() → rAF → draw()                      renderer.ts:110 / 162
+   │  createElement('canvas') 挂到 container            renderer.ts:74
+   │  invalidate() → rAF → draw()                       renderer.ts:114 / 166
 ```
 
 对应文件：
 
-- [`SheetView.tsx`](../../SheetView.tsx) —— 画布容器 div（`flex:1; min-height:0`，否则 canvas 拿不到确定尺寸、视口裁剪全错）；[`SheetView.tsx:30`](../../SheetView.tsx#L30) 调 `useSheetEngine`。
-- [`hooks/useSheetEngine.ts`](../../hooks/useSheetEngine.ts) —— [`useSheetEngine.ts:51`](../../hooks/useSheetEngine.ts#L51) `new SheetEngine(...)`，并订阅事件同步到 React。
-- [`engine/index.ts`](../index.ts) —— `SheetEngine` 构造：`new Renderer`、注入依赖、首次 `invalidate()`。
+- [`SheetView.tsx`](../../SheetView.tsx) —— 画布容器 div（`flex:1; min-height:0`，否则 canvas 拿不到确定尺寸、视口裁剪全错）；[`SheetView.tsx:32`](../../SheetView.tsx#L32) 调 `useSheetEngine`。
+- [`hooks/useSheetEngine.ts`](../../hooks/useSheetEngine.ts) —— [`useSheetEngine.ts:45`](../../hooks/useSheetEngine.ts#L45) 定义 hook，[`useSheetEngine.ts:65`](../../hooks/useSheetEngine.ts#L65) `new SheetEngine(...)`；把引擎事件按 rAF 合并同步到 React，返回 `{ engine, state }`。
+- [`engine/index.ts`](../index.ts) —— `SheetEngine` 构造：`new Renderer`、注入依赖、首次 `invalidate()`；`setReadOnly()` / `setRemoteSelections()` / `load()` 也在这里。
 - [`renderer.ts`](renderer.ts) —— `Renderer` 本体。
 
 关键点：
 
-- **依赖全部注入**：`Renderer` 不自己 new 对象，`skeleton` / `worksheet` / `styles` / `zoom` / `getSelection` 都由 `SheetEngine` 在构造后填进来。
+- **依赖全部注入**：`Renderer` 不自己 new 对象，`skeleton` / `worksheet` / `styles` / `zoom` / `getSelection` / `remoteSelections` 都由 `SheetEngine` 填进来。
+- **`getSelection` 是 getter 不是快照**：交互层会整体替换 selection 对象，存快照会过期。
+- **远端选区由协同层灌入**：`SheetEngine.setRemoteSelections()` → `renderer.remoteSelections`，渲染层只读消费。
+- **只读模式不重建引擎**：`readOnly` 变化走 `engine.setReadOnly()`，重建会丢滚动位置和选区。
 - **重绘只有一条路**：各处调 `renderer.invalidate()` —— 数据变更、`ResizeObserver`、滚动/缩放/选区，都汇聚到这一个方法。
 - **导出只是便利**：`engine/index.ts` re-export `Renderer`，外部 `import { Renderer } from '../engine'`；但装配只发生这一次，别在别处再 `new`。
 
@@ -77,7 +81,7 @@ renderer.draw()
 
 | 文件 | 职责 |
 | --- | --- |
-| [`renderer.ts`](renderer.ts) | `Renderer` 渲染主循环：脏标记 + rAF、DPR、视口裁剪、表头绘制 |
+| [`renderer.ts`](renderer.ts) | `Renderer` 渲染主循环：脏标记 + rAF、DPR、视口裁剪、表头绘制、绘制层注册 |
 | [`accumulator.ts`](accumulator.ts) | `Accumulator` 前缀和累加器：像素 ↔ 行列下标 O(1)/O(log n) |
 | [`skeleton.ts`](skeleton.ts) | `SheetSkeleton` 布局缓存：几何查询、样式解析、文本测量、断行 |
 | [`extensions/extension.ts`](extensions/extension.ts) | `IDrawContext` 绘制上下文、`ISheetExtension` 接口、图层顺序、公共工具 |
@@ -200,6 +204,6 @@ export const conditionalExtension: ISheetExtension = {
 
 2. 在 `extensions/index.ts` 里 re-export 它。
 
-3. 在 `Renderer` 构造的 `_extensions` 数组里加进去（或运行时用 `setExtensions()` 追加）。
+3. 在 `Renderer` 构造的 `_extensions` 数组里加进去（或运行时用 `setExtensions()` 覆盖/追加，返回撤销函数）。
 
 不需要碰 `drawContent()` 的主循环，也不需要改其他图层。

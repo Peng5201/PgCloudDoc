@@ -25,9 +25,9 @@ import cookieParser from 'cookie-parser';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import { AppConfigService } from './config/app-config.service';
-import { AppError } from './common/errors/app-error';
-import { CollabServer } from './modules/collab/collab.server';
-import { NotificationGateway } from './modules/notifications/notification.gateway';
+import { AppError } from './shared/errors/app-error';
+import { CollabServer } from './features/collab/collab.server';
+import { NotificationGateway } from './features/notifications/notification.gateway';
 
 async function bootstrap(): Promise<void> {
     const app = await NestFactory.create<NestExpressApplication>(AppModule, {

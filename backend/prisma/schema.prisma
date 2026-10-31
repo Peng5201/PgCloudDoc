@@ -8,7 +8,7 @@
 
 generator client {
   provider = "prisma-client"
-  output   = "../src/infra/prisma/generated"
+  output   = "../src/infrastructure/prisma/generated"
 }
 
 datasource db {
@@ -39,6 +39,13 @@ enum MemberRole {
   OWNER
   EDITOR
   VIEWER
+}
+
+/// 事务性发件箱状态
+enum OutboxStatus {
+  PENDING
+  PUBLISHED
+  FAILED
 }
 
 // ────────────────────────────── 用户 ──────────────────────────────
@@ -235,6 +242,8 @@ model Notification {
 
 model AuditLog {
   id           String   @id @default(uuid()) @map("id")
+  /// 来源事件 id：同一条 Kafka 消息重复投递时用于幂等
+  eventId      String?  @unique @map("event_id")
   userId       String?  @map("user_id")
   action       String   @map("action")
   resourceType String?  @map("resource_type")
@@ -251,6 +260,27 @@ model AuditLog {
   @@index([resourceType, resourceId])
   @@index([createdAt])
   @@map("audit_logs")
+}
+
+/// 事务性发件箱：业务写库与 Kafka 发布解耦。
+/// Kafka 不可用时事件留在表里，恢复后由 dispatcher 补发，不会丢。
+model OutboxEvent {
+  id          String       @id @default(uuid()) @map("id")
+  topic       String       @map("topic")
+  /// 消息 key（通常 documentId / userId），保证同实体事件落同一分区
+  eventKey    String?      @map("event_key")
+  payload     Json         @map("payload")
+  status      OutboxStatus @default(PENDING) @map("status")
+  attempts    Int          @default(0) @map("attempts")
+  /// 下次可发送时间（失败后的退避）
+  availableAt DateTime     @default(now()) @map("available_at")
+  lastError   String?      @map("last_error")
+  createdAt   DateTime     @default(now()) @map("created_at")
+  publishedAt DateTime?    @map("published_at")
+
+  @@index([status, availableAt])
+  @@index([createdAt])
+  @@map("outbox_events")
 }
 
 /// Kafka 消费幂等表：(topic, partition, msgOffset) 只处理一次
