@@ -10,6 +10,8 @@
 
 PgCloudDoc 是一个**实时协同电子表格**：多个用户可以在浏览器里同时编辑同一份文档，彼此的修改实时合并，并支持随时存档、查看历史版本、一键回滚。
 
+<img width="1271" height="952" alt="5b3d985dd5ddae7df0059de3ca7ee9bb" src="https://github.com/user-attachments/assets/8e63eafd-905c-4419-b5e5-e740b39d4d17" />
+
 核心能力：
 
 | 能力 | 说明 |
