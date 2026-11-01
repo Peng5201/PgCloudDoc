@@ -1,0 +1,59 @@
+{
+  "manifestVersion": 1,
+  "id": "com.pgclouddoc.ai-agent",
+  "name": "AI 助手",
+  "version": "0.2.1",
+  "description": "在侧边栏用自然语言读写当前表格：总结、清洗、格式、排序、查找替换",
+  "author": "PgCloudDoc",
+  "entry": "dist/main.js",
+  "engines": {
+    "pgclouddoc": ">=1.0.0 <2.0.0",
+    "pluginApi": "1"
+  },
+  "activationEvents": ["onView:aiAgent.panel", "onCommand:aiAgent.open"],
+  "contributes": {
+    "commands": [
+      { "id": "aiAgent.open", "title": "打开 AI 助手", "category": "AI" },
+      { "id": "aiAgent.summarizeSelection", "title": "总结选区", "category": "AI" },
+      { "id": "aiAgent.explainFormula", "title": "解释公式", "category": "AI" },
+      { "id": "aiAgent.cleanSelection", "title": "清洗选区", "category": "AI" }
+    ],
+    "toolbar": [
+      {
+        "slot": "sheet.toolbar.end",
+        "command": "aiAgent.open",
+        "title": "AI 助手",
+        "order": 10
+      }
+    ],
+    "panels": [
+      {
+        "id": "aiAgent.panel",
+        "title": "AI 助手",
+        "slot": "editor.sidebar",
+        "icon": "dist/icons/ai.svg"
+      }
+    ]
+  },
+  "permissions": ["document:read", "document:write", "storage"],
+  "settings": [
+    {
+      "key": "autoApply",
+      "type": "boolean",
+      "default": false,
+      "title": "自动应用写操作",
+      "description": "关闭时每次写入都需要用户确认",
+      "scope": "client"
+    },
+    {
+      "key": "contextCellLimit",
+      "type": "number",
+      "default": 2000,
+      "min": 100,
+      "max": 20000,
+      "title": "上下文单元格上限",
+      "description": "每轮随对话发送的选区预览单元格数",
+      "scope": "client"
+    }
+  ]
+}

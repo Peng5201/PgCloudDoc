@@ -7,13 +7,14 @@
     "dev:frontend": "pnpm --filter frontend dev",
     "dev:backend": "pnpm --filter backend dev",
     "dev:plugin": "pnpm --filter @pgclouddoc/plugin-csv-tools dev",
-    "dev:plugin:excel": "pnpm --filter @pgclouddoc/plugin-excel-agent dev",
     "build:plugin-api": "pnpm --filter @pgclouddoc/plugin-api build",
-    "build:plugin": "pnpm --filter @pgclouddoc/plugin-api build && pnpm --filter @pgclouddoc/plugin-csv-tools build && pnpm --filter @pgclouddoc/plugin-excel-agent build",
-    "build:plugin:excel": "pnpm --filter @pgclouddoc/plugin-api build && pnpm --filter @pgclouddoc/plugin-excel-agent build",
-    "typecheck": "pnpm --filter @pgclouddoc/plugin-api build && pnpm -r typecheck",
+    "build:ai-protocol": "pnpm --filter @pgclouddoc/ai-protocol build",
+    "build:plugin": "pnpm build:plugin-api && pnpm build:ai-protocol && pnpm --filter @pgclouddoc/plugin-csv-tools build && pnpm --filter @pgclouddoc/plugin-ai-agent build",
+    "typecheck": "pnpm build:plugin-api && pnpm build:ai-protocol && pnpm -r typecheck",
     "deploy:prod": "node deploy/deploy.mjs",
     "deploy:down": "node deploy/deploy.mjs --down",
-    "deploy:logs": "node deploy/deploy.mjs --logs"
+    "deploy:logs": "node deploy/deploy.mjs --logs",
+    "dev:plugin:ai": "pnpm --filter @pgclouddoc/plugin-ai-agent dev",
+    "build:plugin:ai": "pnpm build:plugin-api && pnpm build:ai-protocol && pnpm --filter @pgclouddoc/plugin-ai-agent build"
   }
 }

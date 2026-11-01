@@ -42,6 +42,12 @@ function devManifestPlugin(): Plugin {
 /** 插件 vite.config.ts 统一调用：definePluginConfig({ port }) */
 export function definePluginConfig(options: { port?: number } = {}) {
   return defineConfig({
+    // 插件不能依赖宿主 React（没有 import map），需要组件时内置 Preact。
+    // 全局配置成 automatic 模式，.tsx 直接写 JSX 即可。
+    esbuild: {
+      jsx: 'automatic',
+      jsxImportSource: 'preact',
+    },
     server: {
       port: options.port ?? 5174,
       strictPort: true,

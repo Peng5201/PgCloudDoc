@@ -1136,7 +1136,7 @@ host page
 | 协议类型 + manifest zod schema + semver 范围 | `packages/plugin-api/` | 完成 |
 | 插件构建脚本（Vite lib → zip + SHA-256 元数据） | `plugins/scripts/build-plugin.mjs` | 完成 |
 | 示例插件（读选区导出 CSV / 事务写入 + 撤销） | `plugins/csv-tools/` | 完成 |
-| 示例插件（工具栏按钮输出工作簿内容到控制台） | `plugins/execl-agent/` | 完成 |
+| 示例插件（AI 助手：侧面板 + Agent 工具调用） | `plugins/ai-agent/` | 完成 |
 | dev server（`/plugin.dev.json` + `/src/index.ts`，CORS） | `plugins/vite.plugin.config.ts` | 完成 |
 | 前端宿主（索引、懒激活、命令、UI 插槽、文档 API、错误边界） | `frontend/src/app/plugins/` | 完成 |
 | 宿主接入（登录态 Provider、编辑页会话、工具栏/状态栏/标题栏插槽） | `App.tsx`、`EditorPage.tsx`、`Toolbar.tsx`、`StatusBar.tsx` | 完成 |

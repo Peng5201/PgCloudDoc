@@ -123,6 +123,27 @@ export const envSchema = z.object({
     // ── 插件 ──
     /** 插件 zip 与解包产物的根目录。生产挂持久卷，开发放在 backend/var/plugins */
     PLUGIN_STORAGE_DIR: z.string().optional().default('./var/plugins'),
+
+    // ── AI 助手 ──
+    AI_ENABLED: bool(true),
+    /** anthropic = Anthropic Messages 原生协议（DeepSeek 兼容端点走这个） */
+    AI_PROVIDER: z.enum(['anthropic', 'mock']).optional().default('anthropic'),
+    AI_BASE_URL: z.string().optional().default('https://api.deepseek.com/anthropic'),
+    /** 只放服务端环境变量，永远不下发给浏览器 */
+    AI_API_KEY: z.string().optional().default(''),
+    AI_MODEL: z.string().optional().default('deepseek-v4-flash'),
+    /** 可切换的模型列表；AI_MODEL 会自动并入 */
+    AI_MODELS: csv(['deepseek-v4-flash']),
+    AI_MAX_OUTPUT_TOKENS: int(4096, 1),
+    AI_REQUEST_TIMEOUT_MS: int(120000, 1000),
+    /** 单用户每日 token 上限；0 = 不限制 */
+    AI_DAILY_TOKEN_LIMIT: int(200000, 0),
+    AI_MAX_TOOL_CALLS_PER_TURN: int(8, 1),
+    AI_MAX_STEPS_PER_CONVERSATION: int(20, 1),
+    AI_CONTEXT_MAX_CHARS: int(60000, 1000),
+    /** 历史消息的总字符预算；超出时从最旧的开始丢弃 */
+    AI_HISTORY_MAX_CHARS: int(240000, 1000),
+    AI_CONVERSATION_TTL_DAYS: int(30, 1),
 });
 
 export type RawEnv = z.infer<typeof envSchema>;

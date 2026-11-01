@@ -86,4 +86,8 @@ export class AppConfigService {
     get plugins() {
         return this.cached.plugins;
     }
+
+    get ai() {
+        return this.cached.ai;
+    }
 }

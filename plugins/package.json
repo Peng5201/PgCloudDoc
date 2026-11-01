@@ -7,11 +7,11 @@
   "scripts": {
     "dev": "pnpm --filter @pgclouddoc/plugin-csv-tools dev",
     "dev:csv-tools": "pnpm --filter @pgclouddoc/plugin-csv-tools dev",
-    "dev:excel-agent": "pnpm --filter @pgclouddoc/plugin-excel-agent dev",
-    "build": "pnpm --filter @pgclouddoc/plugin-api build && pnpm --filter @pgclouddoc/plugin-csv-tools build && pnpm --filter @pgclouddoc/plugin-excel-agent build",
+    "build": "pnpm --filter @pgclouddoc/plugin-api build && pnpm --filter @pgclouddoc/plugin-csv-tools build && pnpm --filter @pgclouddoc/plugin-ai-agent build",
     "build:csv-tools": "node scripts/build-plugin.mjs csv-tools",
-    "build:excel-agent": "node scripts/build-plugin.mjs execl-agent",
-    "typecheck": "pnpm --filter @pgclouddoc/plugin-csv-tools typecheck && pnpm --filter @pgclouddoc/plugin-excel-agent typecheck"
+    "typecheck": "pnpm --filter @pgclouddoc/plugin-csv-tools typecheck && pnpm --filter @pgclouddoc/plugin-ai-agent typecheck",
+    "dev:ai-agent": "pnpm --filter @pgclouddoc/plugin-ai-agent dev",
+    "build:ai-agent": "node scripts/build-plugin.mjs ai-agent"
   },
   "devDependencies": {
     "@pgclouddoc/plugin-api": "workspace:*",

@@ -20,6 +20,7 @@ import type {
   SelectionSnapshot,
   SelectionChangeEvent,
   SheetDocumentApi,
+  SheetInfoSnapshot,
   SheetSummarySnapshot,
   StylePatch,
   WorkbookSnapshot,
@@ -233,6 +234,18 @@ function createSheetDocumentApi(
     return worksheet;
   };
 
+  /** 按 id 取表：读/写非活动表时用，不改变用户的视图和选区 */
+  const worksheetById = (sheetId: string): Worksheet => {
+    if (typeof sheetId !== 'string' || sheetId.length === 0) {
+      throw new PluginApiError('E_PLUGIN_INVALID_INPUT', 'sheetId 必须是非空字符串');
+    }
+    const worksheet = engine.workbook.getSheet(sheetId);
+    if (!worksheet) {
+      throw new PluginApiError('E_PLUGIN_INVALID_RANGE', `工作表不存在：${sheetId}`);
+    }
+    return worksheet;
+  };
+
   const normalizeRange = (range: RangeSnapshot, worksheet: Worksheet): IRange => {
     const values = [range.startRow, range.startColumn, range.endRow, range.endColumn];
     if (values.some((value) => !Number.isInteger(value) || value < 0)) {
@@ -269,6 +282,54 @@ function createSheetDocumentApi(
       active: { ...selection.active },
       ranges: selection.ranges.map((range) => ({ ...range })),
     };
+  };
+
+  /** 读取任意工作表指定区域；调用方负责权限断言 */
+  const readRange = (worksheet: Worksheet, range: RangeSnapshot): CellSnapshot[][] => {
+    const normalized = normalizeRange(range, worksheet);
+    assertCellBudget(normalized);
+
+    const styles = engine.workbook.styles;
+    const rows: CellSnapshot[][] = [];
+    for (let row = normalized.startRow; row <= normalized.endRow; row++) {
+      const out: CellSnapshot[] = [];
+      for (
+        let column = normalized.startColumn;
+        column <= normalized.endColumn;
+        column++
+      ) {
+        const cell = worksheet.getCell(row, column);
+        const style = worksheet.resolveCell(row, column, styles);
+        out.push({
+          value: cell?.v ?? null,
+          formula: cell?.f ?? null,
+          displayText: worksheet.cellText(cell, style),
+        });
+      }
+      rows.push(out);
+    }
+    return rows;
+  };
+
+  /**
+   * 有效区域：有值或有样式的格子。cellData 是稀疏矩阵，
+   * 遍历非空条目即可，不需要扫 rowCount × columnCount。
+   */
+  const usedRangeOf = (worksheet: Worksheet): RangeSnapshot | null => {
+    let startRow = Number.POSITIVE_INFINITY;
+    let startColumn = Number.POSITIVE_INFINITY;
+    let endRow = -1;
+    let endColumn = -1;
+
+    worksheet.cellData.forEach((row, column) => {
+      if (row < startRow) startRow = row;
+      if (row > endRow) endRow = row;
+      if (column < startColumn) startColumn = column;
+      if (column > endColumn) endColumn = column;
+    });
+
+    if (endRow < 0 || endColumn < 0) return null;
+    return { startRow, startColumn, endRow, endColumn };
   };
 
   const executeEdits = (edits: IEdit[], label: string) => {
@@ -348,6 +409,61 @@ function createSheetDocumentApi(
     }
   };
 
+  /**
+   * 事务执行器。活动表与指定表共用同一套逻辑，
+   * 只把「解析工作表」作为参数传进来。
+   */
+  const runTransaction = async <T>(
+    label: string,
+    resolveWorksheet: () => Worksheet,
+    fn: (tx: DocumentTransaction) => Promise<T> | T
+  ): Promise<T> => {
+    assertWrite();
+    const operations: Array<() => IEdit> = [];
+
+    const tx: DocumentTransaction = {
+      setRangeValues(range, values) {
+        const worksheet = resolveWorksheet();
+        const normalized = normalizeRange(range, worksheet);
+        assertCellBudget(normalized);
+        assertValuesShape(normalized, values);
+        operations.push(() =>
+          buildValuesEdit(worksheet, normalized, values, `${EDIT_PREFIX}${label}`)
+        );
+      },
+      clearRange(range) {
+        const worksheet = resolveWorksheet();
+        const normalized = normalizeRange(range, worksheet);
+        assertCellBudget(normalized);
+        operations.push(() =>
+          createClearRangeEdit(worksheet, normalized, `${EDIT_PREFIX}${label}`)
+        );
+      },
+      setRangeStyle(range, patch) {
+        const worksheet = resolveWorksheet();
+        const normalized = normalizeRange(range, worksheet);
+        assertCellBudget(normalized);
+        const stylePatch = toStylePatch(patch);
+        operations.push(() =>
+          createSetRangeStylesEdit(
+            engine.workbook,
+            worksheet,
+            normalized,
+            stylePatch,
+            `${EDIT_PREFIX}${label}`
+          )
+        );
+      },
+    };
+
+    const result = await fn(tx);
+    executeEdits(
+      operations.map((buildEdit) => buildEdit()),
+      label
+    );
+    return result;
+  };
+
   const api: SheetDocumentApi = {
     id: session.id,
     get title() {
@@ -400,6 +516,21 @@ function createSheetDocumentApi(
       }));
     },
 
+    getSheetInfo(): SheetInfoSnapshot[] {
+      assertRead();
+      return engine.getSheets().map((summary) => {
+        const worksheet = engine.workbook.getSheet(summary.id);
+        return {
+          id: summary.id,
+          name: summary.name,
+          hidden: summary.hidden,
+          rowCount: worksheet?.rowCount ?? 0,
+          columnCount: worksheet?.columnCount ?? 0,
+          usedRange: worksheet ? usedRangeOf(worksheet) : null,
+        };
+      });
+    },
+
     getActiveSheetId() {
       assertRead();
       return activeWorksheet().id;
@@ -412,30 +543,12 @@ function createSheetDocumentApi(
 
     async getRangeValues(range) {
       assertRead();
-      const worksheet = activeWorksheet();
-      const normalized = normalizeRange(range, worksheet);
-      assertCellBudget(normalized);
+      return readRange(activeWorksheet(), range);
+    },
 
-      const styles = engine.workbook.styles;
-      const rows: CellSnapshot[][] = [];
-      for (let row = normalized.startRow; row <= normalized.endRow; row++) {
-        const out: CellSnapshot[] = [];
-        for (
-          let column = normalized.startColumn;
-          column <= normalized.endColumn;
-          column++
-        ) {
-          const cell = worksheet.getCell(row, column);
-          const style = worksheet.resolveCell(row, column, styles);
-          out.push({
-            value: cell?.v ?? null,
-            formula: cell?.f ?? null,
-            displayText: worksheet.cellText(cell, style),
-          });
-        }
-        rows.push(out);
-      }
-      return rows;
+    async getRangeValuesInSheet(sheetId, range) {
+      assertRead();
+      return readRange(worksheetById(sheetId), range);
     },
 
     async getSnapshot(): Promise<WorkbookSnapshot> {
@@ -505,50 +618,13 @@ function createSheetDocumentApi(
     },
 
     async transact(label, fn) {
-      assertWrite();
-      const operations: Array<() => IEdit> = [];
+      return runTransaction(label, activeWorksheet, fn);
+    },
 
-      const tx: DocumentTransaction = {
-        setRangeValues(range, values) {
-          const worksheet = activeWorksheet();
-          const normalized = normalizeRange(range, worksheet);
-          assertCellBudget(normalized);
-          assertValuesShape(normalized, values);
-          operations.push(() =>
-            buildValuesEdit(worksheet, normalized, values, `${EDIT_PREFIX}${label}`)
-          );
-        },
-        clearRange(range) {
-          const worksheet = activeWorksheet();
-          const normalized = normalizeRange(range, worksheet);
-          assertCellBudget(normalized);
-          operations.push(() =>
-            createClearRangeEdit(worksheet, normalized, `${EDIT_PREFIX}${label}`)
-          );
-        },
-        setRangeStyle(range, patch) {
-          const worksheet = activeWorksheet();
-          const normalized = normalizeRange(range, worksheet);
-          assertCellBudget(normalized);
-          const stylePatch = toStylePatch(patch);
-          operations.push(() =>
-            createSetRangeStylesEdit(
-              engine.workbook,
-              worksheet,
-              normalized,
-              stylePatch,
-              `${EDIT_PREFIX}${label}`
-            )
-          );
-        },
-      };
-
-      const result = await fn(tx);
-      executeEdits(
-        operations.map((buildEdit) => buildEdit()),
-        label
-      );
-      return result;
+    async transactInSheet(sheetId, label, fn) {
+      // 先校验存在：避免 fn 执行到一半才发现工作表不存在
+      worksheetById(sheetId);
+      return runTransaction(label, () => worksheetById(sheetId), fn);
     },
   };
 

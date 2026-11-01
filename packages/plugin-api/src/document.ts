@@ -28,6 +28,21 @@ export interface SheetSummarySnapshot {
   hidden: boolean;
 }
 
+/**
+ * 工作表的尺寸与有效区域。
+ *
+ * `usedRange` 覆盖有内容或有样式的单元格；空表为 `null`。
+ * 它只是「读取建议」，不代表写入边界 —— 写入仍受 rowCount / columnCount 约束。
+ */
+export interface SheetInfoSnapshot {
+  id: string;
+  name: string;
+  hidden: boolean;
+  rowCount: number;
+  columnCount: number;
+  usedRange: RangeSnapshot | null;
+}
+
 /** 单元格的只读快照。`displayText` 是按数字格式渲染后的显示文本 */
 export interface CellSnapshot {
   value: string | number | boolean | null;
@@ -102,10 +117,17 @@ export interface SheetDocumentApi {
   getSelection(): SelectionSnapshot;
   setSelection(selection: SelectionSnapshot): Promise<void>;
   getSheets(): SheetSummarySnapshot[];
+  /** 所有工作表的尺寸与有效区域；不需要切换到目标表 */
+  getSheetInfo(): SheetInfoSnapshot[];
   getActiveSheetId(): string;
   setActiveSheet(sheetId: string): Promise<void>;
   /** 超过 20,000 格抛 E_PLUGIN_RANGE_TOO_LARGE */
   getRangeValues(range: RangeSnapshot): Promise<CellSnapshot[][]>;
+  /**
+   * 读取任意工作表，**不切换当前活动表、不改变用户的选区和视图**。
+   * 工作表不存在抛 E_PLUGIN_INVALID_RANGE。
+   */
+  getRangeValuesInSheet(sheetId: string, range: RangeSnapshot): Promise<CellSnapshot[][]>;
   /** 整份只读快照。大文档慎用，优先读选区 */
   getSnapshot(): Promise<WorkbookSnapshot>;
 
@@ -120,6 +142,15 @@ export interface SheetDocumentApi {
 
   /** 多次写入合成一个撤销单元；fn 抛错则不落任何改动 */
   transact<T>(label: string, fn: (tx: DocumentTransaction) => Promise<T> | T): Promise<T>;
+  /**
+   * 在指定工作表上执行事务，**不切换当前活动表**。
+   * 写入同样进入撤销栈与协同广播，一次事务 = 一个撤销单元。
+   */
+  transactInSheet<T>(
+    sheetId: string,
+    label: string,
+    fn: (tx: DocumentTransaction) => Promise<T> | T
+  ): Promise<T>;
 }
 
 export interface DocumentHub {

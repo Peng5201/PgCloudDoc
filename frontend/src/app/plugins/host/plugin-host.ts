@@ -20,6 +20,7 @@ import {
   type PluginSidePanelBridge,
 } from '../api/context';
 import { createDocumentHub } from '../api/document-api';
+import { createPluginNet } from '../api/net';
 import { DocumentSessionRegistry, type DocumentSessionOptions } from './document-session';
 import { HOST_VERSION } from './host-version';
 import { injectPluginStyle, loadPluginModule } from './plugin-loader';
@@ -78,6 +79,8 @@ interface PanelViewEntry {
 export class PluginHost {
   readonly ui = new PluginUiStore();
 
+  /** 所有插件共用一份：底层就是宿主的 api/client，单飞刷新必须全局唯一 */
+  private readonly net = createPluginNet();
   private readonly sessions = new DocumentSessionRegistry();
   private readonly entries = new Map<string, DiscoveredPlugin>();
   private readonly states = new Map<string, PluginState>();
@@ -252,6 +255,7 @@ export class PluginHost {
         hostVersion: HOST_VERSION,
         documents: documentHub.hub,
         uiStore: this.ui,
+        net: this.net,
         sidePanel: this.sidePanelBridge,
         registerCommand: (pluginId, commandId, handler) =>
           this.registerCommand(pluginId, commandId, handler),

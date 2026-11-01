@@ -122,6 +122,25 @@ export function buildConfig() {
         plugins: {
             storageDir: env.PLUGIN_STORAGE_DIR,
         },
+
+        ai: {
+            enabled: env.AI_ENABLED,
+            provider: env.AI_PROVIDER,
+            baseUrl: env.AI_BASE_URL.replace(/\/+$/, ''),
+            apiKey: env.AI_API_KEY,
+            model: env.AI_MODEL,
+            models: env.AI_MODELS.includes(env.AI_MODEL)
+                ? env.AI_MODELS
+                : [env.AI_MODEL, ...env.AI_MODELS],
+            maxOutputTokens: env.AI_MAX_OUTPUT_TOKENS,
+            requestTimeoutMs: env.AI_REQUEST_TIMEOUT_MS,
+            dailyTokenLimit: env.AI_DAILY_TOKEN_LIMIT,
+            maxToolCallsPerTurn: env.AI_MAX_TOOL_CALLS_PER_TURN,
+            maxStepsPerConversation: env.AI_MAX_STEPS_PER_CONVERSATION,
+            contextMaxChars: env.AI_CONTEXT_MAX_CHARS,
+            historyMaxChars: env.AI_HISTORY_MAX_CHARS,
+            conversationTtlDays: env.AI_CONVERSATION_TTL_DAYS,
+        },
     };
 }
 

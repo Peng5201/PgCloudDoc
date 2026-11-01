@@ -65,6 +65,23 @@ x-backend-env: &backend-env
   # backend 写入，nginx 只读挂载同一个卷
   PLUGIN_STORAGE_DIR: /data/plugins
 
+  # ── AI 助手 ──
+  # 密钥只存在服务器；留空 AI_API_KEY = 功能不可用（插件会提示服务端未配置）
+  AI_ENABLED: ${AI_ENABLED:-true}
+  AI_PROVIDER: ${AI_PROVIDER:-anthropic}
+  AI_BASE_URL: ${AI_BASE_URL:-https://api.deepseek.com/anthropic}
+  AI_API_KEY: ${AI_API_KEY:-}
+  AI_MODEL: ${AI_MODEL:-deepseek-v4-flash}
+  AI_MODELS: ${AI_MODELS:-deepseek-v4-flash}
+  AI_MAX_OUTPUT_TOKENS: ${AI_MAX_OUTPUT_TOKENS:-4096}
+  AI_REQUEST_TIMEOUT_MS: ${AI_REQUEST_TIMEOUT_MS:-120000}
+  AI_DAILY_TOKEN_LIMIT: ${AI_DAILY_TOKEN_LIMIT:-200000}
+  AI_MAX_TOOL_CALLS_PER_TURN: ${AI_MAX_TOOL_CALLS_PER_TURN:-8}
+  AI_MAX_STEPS_PER_CONVERSATION: ${AI_MAX_STEPS_PER_CONVERSATION:-20}
+  AI_CONTEXT_MAX_CHARS: ${AI_CONTEXT_MAX_CHARS:-60000}
+  AI_HISTORY_MAX_CHARS: ${AI_HISTORY_MAX_CHARS:-240000}
+  AI_CONVERSATION_TTL_DAYS: ${AI_CONVERSATION_TTL_DAYS:-30}
+
   # 启动时把这些邮箱提升为管理员（逗号分隔，只升不降）
   ADMIN_EMAILS: ${ADMIN_EMAILS:-}
 

@@ -14,7 +14,7 @@
 - 插件库本地开发与构建：[README.MD](README.MD)
 - 协议类型唯一真源：[packages/plugin-api/src](../packages/plugin-api/src/index.ts)
 - 文档 API 宿主实现：[frontend/src/app/plugins/api/document-api.ts](../frontend/src/app/plugins/api/document-api.ts)
-- 示例插件：[csv-tools](csv-tools/src/index.ts)、[execl-agent](execl-agent/src/index.ts)
+- 示例插件：[csv-tools](csv-tools/src/index.ts)、[ai-agent](ai-agent/src/index.ts)
 
 > 本文按**当前实现**编写。设计文档中尚未落地的能力（如菜单渲染、远程 origin）在本文中会明确标注「v1 未接入」，不要按设计稿调用。
 
@@ -31,7 +31,7 @@
 - [7. 与界面交互：命令 API](#7-与界面交互命令-api)
 - [8. 与界面交互：UI API](#8-与界面交互ui-api)
 - [9. 与服务交互：设置 API](#9-与服务交互设置-api)
-- [10. 与服务交互：存储 API](#10-与服务交互存储-api)
+- [10. 与服务交互：存储与网络 API](#10-与服务交互存储与网络-api)
 - [11. 日志、订阅与上下文属性](#11-日志订阅与上下文属性)
 - [12. 权限模型](#12-权限模型)
 - [13. 错误码](#13-错误码)
@@ -328,6 +328,7 @@ active ──停用 / 退出登录 / 页面卸载──> disposed
 | `ui` | 界面 | `UiApi` | 注册工具栏/状态栏/菜单、弹消息（见 8） |
 | `settings` | 服务 | `SettingsApi` | 读取服务端下发的清单设置（见 9） |
 | `storage` | 服务 | `StorageApi` | 按插件 + 用户隔离的键值存储（见 10） |
+| `net` | 服务 | `NetApi` | 同源 HTTP 访问，复用宿主登录态与单飞刷新（见 10.2） |
 | `subscriptions` | 运行时 | `Disposable[]` | 所有注册/监听的统一释放列表 |
 | `hasPermission(permission)` | 运行时 | `(PluginPermission) => boolean` | 查询 manifest 是否声明了某权限 |
 
@@ -339,7 +340,7 @@ active ──停用 / 退出登录 / 页面卸载──> disposed
 | --- | --- | --- | --- |
 | **文档** | `documents.active` / `onDidOpen` / `onDidClose`；`SheetDocumentApi` 的读接口、写接口、事件、`transact`；`DocumentTransaction` | `DocumentHub` 负责文档生命周期，`SheetDocumentApi` 读写选区/工作表/整簿快照，`transact` 合并撤销单元 | 第 6 章 |
 | **界面** | `commands.register` / `commands.execute`；`ui.registerToolbarItem` / `registerStatusBarItem` / `registerMenuItem` / `registerPanel` / `showMessage`；manifest `contributes` | 工具栏/状态栏/菜单入口、命令注册与执行、全局消息提示 | 3.2、第 7 章、第 8 章 |
-| **服务** | `settings.get` / `settings.onChange`；`storage.get` / `set` / `delete` / `keys`；插件索引、静态产物、管理端、协同、etcd、数据库、插件自身网络请求 | 服务端下发配置、本地键值存储、平台与外部 HTTP / WebSocket 服务 | 第 9 章、第 10 章、第 14 章 |
+| **服务** | `settings.get` / `settings.onChange`；`storage.get` / `set` / `delete` / `keys`；`net.fetch`；插件索引、静态产物、管理端、协同、etcd、数据库、插件自身网络请求 | 服务端下发配置、本地键值存储、同源 HTTP、平台与外部 HTTP / WebSocket 服务 | 第 9 章、第 10 章、第 14 章 |
 
 `logger`、`subscriptions`、`hasPermission`、`pluginId` 等属于运行时辅助，不构成与文档/界面/服务的交互面。
 
@@ -379,7 +380,7 @@ active ──停用 / 退出登录 / 页面卸载──> disposed
 
 ### 6.3 文档操作的总规则
 
-1. **所有范围操作都作用于「当前活动工作表」**。API 没有 `sheetId` 参数；需要操作其他工作表时先 `setActiveSheet(sheetId)`。
+1. **默认作用于「当前活动工作表」**。`getRangeValues`、`setRangeValues`、`clearRange`、`setRangeStyle`、`transact` 没有 `sheetId` 参数；需要操作其他工作表时用带 `InSheet` 后缀的接口（`getRangeValuesInSheet` / `transactInSheet`），它们不会切换用户视图。`setActiveSheet(sheetId)` 仍然可用于显式切换当前表。
 2. **坐标 0-based、闭区间**。`{ startRow: 0, startColumn: 0, endRow: 2, endColumn: 2 }` 表示 A1:C3。
 3. 范围会先做归一化：起止颠倒会自动交换（min/max），负数或非整数直接拒绝。
 4. 超出工作表边界的部分会被裁剪到有效范围；完全越界抛 `E_PLUGIN_INVALID_RANGE`。
@@ -428,6 +429,18 @@ const { active, ranges } = doc.getSelection();
 | 副作用 | 无 |
 | 错误 | `E_PLUGIN_DISPOSED`、`E_PLUGIN_PERMISSION` |
 
+#### `getSheetInfo(): SheetInfoSnapshot[]`
+
+| 项目 | 内容 |
+| --- | --- |
+| 权限 | `document:read` |
+| 同步性 | 同步 |
+| 作用 | 返回所有工作表的尺寸与有效区域，**不会切换当前表** |
+| 返回 | `Array<{ id; name; hidden; rowCount; columnCount; usedRange: RangeSnapshot \| null }>` |
+| 副作用 | 无 |
+| 说明 | `usedRange` 覆盖有值或有样式的单元格；空表为 `null`。它只是读取建议，不代表写入边界 |
+| 错误 | `E_PLUGIN_DISPOSED`、`E_PLUGIN_PERMISSION` |
+
 #### `getActiveSheetId(): string`
 
 | 项目 | 内容 |
@@ -448,7 +461,7 @@ const { active, ranges } = doc.getSelection();
 | 限制 | 未知 `sheetId` **静默忽略**（不抛错、不切换）；传入当前表 id 直接返回；只读文档下也可调用 |
 | 错误 | `E_PLUGIN_DISPOSED`、`E_PLUGIN_PERMISSION` |
 
-> 宿主没有单独的「读某个工作表某个范围」接口。正确用法是：`setActiveSheet(id)` → `getRangeValues(range)`。切换是本地视图操作，不会作为一次编辑广播给协作者。
+> `setActiveSheet` 是**本地视图操作**，会切换用户的当前表并把选区重置为 A1。需要读其他工作表时优先用 `getRangeValuesInSheet`，不要为了读数据去切表。
 
 #### `getRangeValues(range): Promise<CellSnapshot[][]>`
 
@@ -476,6 +489,27 @@ const { active, ranges } = doc.getSelection();
 - 数字有数字格式时按格式渲染（日期、百分比、千分位等）；
 - 布尔值显示 `TRUE` / `FALSE`；
 - 空格子显示空字符串。
+
+#### `getRangeValuesInSheet(sheetId, range): Promise<CellSnapshot[][]>`
+
+| 项目 | 内容 |
+| --- | --- |
+| 权限 | `document:read` |
+| 同步性 | 异步 |
+| 作用 | 读取**指定工作表**的指定范围 |
+| 副作用 | **无**：不切换活动表、不改变用户选区、不触发 `sheet-change` |
+| 限制 | 同 `getRangeValues`（20,000 格上限、坐标归一化） |
+| 错误 | `E_PLUGIN_DISPOSED`、`E_PLUGIN_PERMISSION`、`E_PLUGIN_INVALID_RANGE`（工作表不存在或范围越界）、`E_PLUGIN_RANGE_TOO_LARGE` |
+
+```ts
+const [sheet2] = doc.getSheetInfo().filter((sheet) => sheet.name === 'Sheet2');
+const rows = await doc.getRangeValuesInSheet(sheet2.id, {
+  startRow: 0,
+  startColumn: 0,
+  endRow: 9,
+  endColumn: 2,
+});
+```
 
 #### `getSnapshot(): Promise<WorkbookSnapshot>`
 
@@ -639,6 +673,24 @@ await doc.transact('导入数据', (tx) => {
 // 用户按一次 Ctrl+Z 即可整体撤销
 ```
 
+#### `transactInSheet(sheetId, label, fn): Promise<T>`
+
+| 项目 | 内容 |
+| --- | --- |
+| 权限 | `document:write` + `doc.canWrite` |
+| 同步性 | 异步 |
+| 作用 | 在**指定工作表**上执行事务，语义与 `transact` 完全一致 |
+| 副作用 | 只写目标工作表；**不切换活动表、不改变用户选区**；写入进入撤销栈并协同广播 |
+| 撤销 | 一次调用 = 一个撤销单元 |
+| 错误 | 写错误；工作表不存在抛 `E_PLUGIN_INVALID_RANGE` |
+| 说明 | 事务在开始前校验工作表存在；`fn` 内每次 `tx.*` 仍按目标表解析范围 |
+
+```ts
+await doc.transactInSheet(sheet2Id, '写入汇总表', (tx) => {
+  tx.setRangeValues(range, values);
+});
+```
+
 ### 6.7 事件
 
 #### `onDidChange(cb): Disposable`
@@ -709,14 +761,17 @@ doc.setRangeValues(range, values)
 | `getSelection()` | read | 是 | 否 | 否 | PERMISSION / DISPOSED |
 | `setSelection()` | read | 否 | 否 | 选区 awareness（编辑者） | PERMISSION / DISPOSED |
 | `getSheets()` | read | 是 | 否 | 否 | PERMISSION / DISPOSED |
+| `getSheetInfo()` | read | 是 | 否 | 否 | PERMISSION / DISPOSED |
 | `getActiveSheetId()` | read | 是 | 否 | 否 | + NO_DOCUMENT |
 | `setActiveSheet()` | read | 否 | 否 | 否（本地视图） | PERMISSION / DISPOSED |
 | `getRangeValues()` | read | 否 | 否 | 否 | + INVALID_RANGE / RANGE_TOO_LARGE |
+| `getRangeValuesInSheet()` | read | 否 | 否 | 否 | + INVALID_RANGE / RANGE_TOO_LARGE |
 | `getSnapshot()` | read | 否 | 否 | 否 | PERMISSION / DISPOSED |
 | `setRangeValues()` | write | 否 | **是** | **是** | + READ_ONLY / INVALID_INPUT |
 | `clearRange()` | write | 否 | **是** | **是** | + READ_ONLY / INVALID_RANGE |
 | `setRangeStyle()` | write | 否 | **是** | **是** | + READ_ONLY / RANGE_TOO_LARGE |
 | `transact()` | write | 否 | **是（整体一个）** | **是** | + READ_ONLY / INVALID_INPUT |
+| `transactInSheet()` | write | 否 | **是（整体一个）** | **是** | + READ_ONLY / INVALID_INPUT / INVALID_RANGE |
 | `onDidChange()` | — | 是 | — | — | — |
 | `onDidChangeSelection()` | — | 是 | — | — | — |
 
@@ -882,7 +937,9 @@ interface SettingsApi {
 
 ---
 
-## 10. 与服务交互：存储 API
+## 10. 与服务交互：存储与网络 API
+
+### 10.1 本地存储：StorageApi
 
 ```ts
 interface StorageApi {
@@ -907,6 +964,43 @@ interface StorageApi {
 | 生命周期 | 退出登录后数据仍保留；宿主不会自动清理 |
 
 > 不要把文档内容、用户隐私或超过 1 MB 的数据放进 `storage`。它适合保存「上次使用的分隔符」「面板展开状态」这类小配置。
+
+### 10.2 网络：`ctx.net.fetch`
+
+```ts
+interface NetApi {
+  fetch(path: string, init?: {
+    method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+    headers?: Record<string, string>;
+    body?: unknown;
+    signal?: AbortSignal;
+  }): Promise<Response>;
+}
+```
+
+| 项目 | 内容 |
+| --- | --- |
+| 路径 | 只接受同源相对路径（以 `/` 开头，不能是 `//host` / 绝对 URL），否则抛 `E_PLUGIN_INVALID_INPUT` |
+| 鉴权 | 复用宿主登录态：自动注入 `Authorization: Bearer <access token>` |
+| 401 | 先走宿主的**单飞刷新**，刷新成功重放一次；刷新失败返回原始 401，不循环重试 |
+| body | 普通对象按 JSON 发送并自动设置 `Content-Type`；`string` / `Blob` / `FormData` / `ArrayBuffer` 原样发送 |
+| 返回 | 原生 `Response`，**不解析** `{ success, data }` 信封，非 2xx 也不抛错 |
+| 流式 | 支持 SSE / `ReadableStream`：`const response = await ctx.net.fetch(...); response.body.getReader()` |
+
+为什么需要它：插件虽然可以直接用全局 `fetch`，但 access token 存在 `localStorage` 且 15 分钟过期，refresh token 是 httpOnly cookie 且只有宿主维护了单飞刷新。插件自己刷新会与宿主并发轮换 refresh token，可能把用户直接登出。
+
+```ts
+const response = await ctx.net.fetch('/api/v1/ai/config', {
+  headers: { Accept: 'application/json' },
+});
+if (!response.ok) {
+  ctx.ui.showMessage('error', `请求失败：${response.status}`);
+  return;
+}
+const data = await response.json();
+```
+
+> `net.fetch` 不做权限拦截（同 realm 插件本来就能调用全局 `fetch`），它解决的是登录态正确性。跨域请求、第三方域名仍按浏览器 CORS 规则处理，并且必须在插件 README 的「外部服务」表中声明。
 
 ---
 
@@ -958,7 +1052,7 @@ manifest `permissions` 允许的值：
 
 - 订阅类接口（`onDidChange`、`onDidChangeSelection`、`onDidOpen`）不做权限校验；插件仍应在 manifest 中声明 `document:read`，不要依赖未声明的能力。
 - UI 贡献不做运行时权限控制；`requiresWrite` 只控制「文档只读时禁用按钮」。
-- 网络访问**没有对应权限**，也无法在 same-realm 中限制，见 16。
+- 网络访问**没有对应权限**，也无法在 same-realm 中限制，见 16。`ctx.net.fetch` 只是复用宿主登录态的便利入口，不是权限边界。
 
 最小权限原则：只声明真正用到的权限；管理端审核页会展示权限清单。
 
@@ -1117,7 +1211,7 @@ Cookie: <登录会话>
 // localStorage['pgclouddoc.plugin-dev']
 JSON.stringify({
   'com.pgclouddoc.csv-tools': 'http://localhost:5174/',
-  'com.pgclouddoc.excel-agent': 'http://localhost:5175/'
+  'com.pgclouddoc.ai-agent': 'http://localhost:5175/'
 })
 ```
 
@@ -1128,7 +1222,7 @@ JSON.stringify({
 | manifest | `GET <baseUrl>plugin.dev.json`，由 Vite 中间件实时读取 `plugin.json`，把 `entry` 改写为 `src/index.ts` 并去掉 `style` |
 | 入口 | `GET <baseUrl>src/index.ts`，Vite 负责 TS 转换与 HMR |
 | CORS | 开发服务器返回 `Access-Control-Allow-Origin: *`，manifest 响应 `Cache-Control: no-store` |
-| 端口 | csv-tools 5174，excel-agent 5175；`strictPort: true` |
+| 端口 | csv-tools 5174，ai-agent 5175；`strictPort: true` |
 | 优先级 | 同 id 时开发配置**覆盖**服务端版本 |
 | 生产 | 这段逻辑用 `import.meta.env.DEV` 包裹，生产构建不会加载任意远程插件 |
 
@@ -1229,7 +1323,7 @@ JSON.stringify({
 pnpm install
 pnpm build:plugin-api      # 首次或协议包变更后
 pnpm dev:plugin            # csv-tools，5174
-pnpm dev:plugin:excel      # excel-agent，5175
+pnpm dev:plugin:ai         # ai-agent，5175
 ```
 
 登录后、打开文档前，在浏览器控制台配置开发映射（见 14.5），然后打开任意文档。开发插件同 id 时覆盖服务端版本。
@@ -1238,7 +1332,7 @@ pnpm dev:plugin:excel      # excel-agent，5175
 
 ```bash
 pnpm build:plugin                                      # 构建所有插件
-pnpm build:plugin:excel                                # 只构建 excel-agent
+pnpm build:plugin:ai                                   # 只构建 ai-agent
 pnpm --filter @pgclouddoc/plugin-csv-tools build       # 只构建 csv-tools（在仓库根执行）
 ```
 
@@ -1310,6 +1404,8 @@ plugins/<plugin>/release/<id>-<version>.json    # zip 与各文件的 SHA-256、
 - [ ] 只 import `@pgclouddoc/plugin-api` 的类型，不 import 宿主内部模块
 - [ ] 所有注册/监听放进 `context.subscriptions`
 - [ ] 写操作前检查 `doc.canWrite`，并处理 `E_PLUGIN_READ_ONLY`
+- [ ] 同源请求用 `ctx.net.fetch`，不要自己读 access token 或自己刷新
+- [ ] 读写其他工作表用 `getRangeValuesInSheet` / `transactInSheet`，不要为了读数据切换用户视图
 - [ ] 多条写入用 `transact` 合成一次撤销
 - [ ] 单次读写 ≤ 20,000 格，大批量分批
 - [ ] 优先 `getRangeValues`，避免对大文档频繁 `getSnapshot`

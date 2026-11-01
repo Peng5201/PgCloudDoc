@@ -1,0 +1,27 @@
+{
+  "name": "@pgclouddoc/plugin-ai-agent",
+  "version": "0.2.1",
+  "private": true,
+  "type": "module",
+  "description": "AI 助手：在侧边栏用自然语言读写当前表格",
+  "scripts": {
+    "predev": "pnpm --filter @pgclouddoc/ai-protocol build",
+    "dev": "vite --config vite.config.ts",
+    "prebuild": "pnpm --filter @pgclouddoc/ai-protocol build",
+    "build": "node ../scripts/build-plugin.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@pgclouddoc/ai-protocol": "workspace:*",
+    "@pgclouddoc/plugin-api": "workspace:*",
+    "dompurify": "^3.2.6",
+    "marked": "^15.0.7",
+    "preact": "^10.26.4"
+  },
+  "devDependencies": {
+    "typescript": "~5.8.3",
+    "vite": "^6.3.5",
+    "vitest": "^5.0.5"
+  }
+}

@@ -10,6 +10,7 @@ import type {
   Disposable,
   DocumentHub,
   MessageLevel,
+  NetApi,
   PluginContext,
   PluginPermission,
   SettingsApi,
@@ -37,6 +38,8 @@ export interface PluginContextDeps {
   hostVersion: string;
   documents: DocumentHub;
   uiStore: PluginUiStore;
+  /** 同源 HTTP 访问（复用宿主登录态与单飞刷新） */
+  net: NetApi;
   /** 宿主侧面板。未挂载侧面板容器（列表页/测试）时为空，面板相关 API 退化为 no-op */
   sidePanel?: PluginSidePanelBridge;
   registerCommand(pluginId: string, commandId: string, handler: CommandHandler): Disposable;
@@ -253,6 +256,7 @@ export function createPluginContext(deps: PluginContextDeps): PluginContext {
     ui,
     settings,
     storage,
+    net: deps.net,
     subscriptions,
     hasPermission: (permission) => permissions.has(permission),
   };

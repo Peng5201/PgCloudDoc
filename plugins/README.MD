@@ -16,16 +16,17 @@ plugins/
     plugin.json
     src/index.ts
     vite.config.ts
-  execl-agent/              # 示例插件：把表格内容输出到控制台
+  ai-agent/                 # 示例插件：AI 助手侧面板（Agent + 表格工具）
     plugin.json
     src/index.ts
+    src/controller.ts
     vite.config.ts
 ```
 
 每个示例插件的接口说明（命令、权限、调用的文档接口与副作用、外部服务）：
 
 - [csv-tools/README.md](csv-tools/README.md)
-- [execl-agent/README.md](execl-agent/README.md)
+- [ai-agent/README.md](ai-agent/README.md)
 
 ## 本地开发
 
@@ -34,6 +35,7 @@ plugins/
    ```bash
    pnpm install
    pnpm build:plugin-api
+   pnpm build:ai-protocol
    ```
 
 2. 启动插件的 Vite dev server：
@@ -61,10 +63,22 @@ plugins/
    - 「填充示例」向 A1:C3 写入示例数据，可 Ctrl+Z 整体撤销；
    - 「CSV 工具」侧面板由 manifest 声明，点开时才激活插件并挂上内容（`onView` 懒激活）。
 
-### 另一个示例：输出表格到控制台
+### 另一个示例：AI 助手
 
 ```bash
-pnpm dev:plugin:excel      # dev server，端口 5175
+pnpm dev:plugin:ai         # dev server，端口 5175
+```
+
+后端先启用 AI 网关（本地建议先用 mock，不调外部服务）：
+
+```dotenv
+AI_ENABLED=true
+AI_PROVIDER=mock
+# 接真实模型：
+# AI_PROVIDER=anthropic
+# AI_BASE_URL=https://api.deepseek.com/anthropic
+# AI_API_KEY=<key>
+# AI_MODEL=deepseek-v4-flash
 ```
 
 浏览器控制台设置（可与上面的 csv-tools 同时存在）：
@@ -74,13 +88,14 @@ localStorage.setItem(
   'pgclouddoc.plugin-dev',
   JSON.stringify({
     'com.pgclouddoc.csv-tools': 'http://localhost:5174/',
-    'com.pgclouddoc.excel-agent': 'http://localhost:5175/',
+    'com.pgclouddoc.ai-agent': 'http://localhost:5175/',
   })
 );
 ```
 
-打开文档后点击「输出表格」，控制台会打印整份工作簿快照。详见
-[execl-agent/README.md](execl-agent/README.md)。
+打开文档后点击工具栏「AI 助手」或右侧活动栏图标。面板会读取当前文档结构与选区，
+通过 `/api/v1/ai/*` 与模型交互，工具在浏览器里执行。详见
+[ai-agent/README.md](ai-agent/README.md)。
 
 ## 构建发布包
 
@@ -99,7 +114,7 @@ plugins/csv-tools/release/<id>-<version>.json  # zip / 每个文件的 SHA-256
 `pnpm build:plugin` 会构建所有插件；只想构建某一个时：
 
 ```bash
-pnpm build:plugin:excel                         # 仅 excel-agent
+pnpm build:plugin:ai                            # 仅 ai-agent
 pnpm --filter @pgclouddoc/plugin-csv-tools build # 仅 csv-tools
 ```
 
@@ -107,7 +122,7 @@ zip 就是服务端上传接口的输入；浏览器不会下载 zip，服务端
 
 ## 管理端上传
 
-1. 构建插件 zip（`pnpm build:plugin` 或 `pnpm build:plugin:excel`）；
+1. 构建插件 zip（`pnpm build:plugin` 或 `pnpm build:plugin:ai`）；
 2. 用管理员账号打开 **管理后台 → 插件管理**；
 3. 点「上传插件」选择 zip。服务端会校验 `plugin.json`、文件类型、路径与解压体积，
    通过后立即成为当前版本并启用；
@@ -126,4 +141,5 @@ zip 就是服务端上传接口的输入；浏览器不会下载 zip，服务端
 - 所有注册/监听放进 `context.subscriptions`（`commands.register` / `ui.register*` 会自动放）；
 - 文档读写一律走 `context.documents`，不要碰 `window.__sheetEngine` 或 Y.Doc；
 - 不在模块顶层持有文档/用户数据（插件停用时模块本身不会被卸载）；
-- React / antd 在构建时 external，由宿主提供同一实例（P1 接入 import map）。
+- React / antd 在构建时 external，由宿主提供同一实例（P1 接入 import map）；
+  插件需要组件时内置 Preact（`ai-agent` 的做法），不要打包第二份 React。

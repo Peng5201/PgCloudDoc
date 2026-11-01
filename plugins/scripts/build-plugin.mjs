@@ -61,6 +61,11 @@ await build({
   root: pluginDir,
   configFile: false,
   logLevel: 'warn',
+  // 插件内置 Preact 时使用 automatic JSX；不依赖宿主 React 运行时
+  esbuild: {
+    jsx: 'automatic',
+    jsxImportSource: 'preact',
+  },
   build: {
     target: 'es2022',
     outDir: 'dist',

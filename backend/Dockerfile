@@ -60,8 +60,10 @@ COPY backend/package.json ./backend/package.json
 COPY frontend/package.json ./frontend/package.json
 # 新增 workspace 包后，frozen-lockfile 要求所有 importer 的 package.json 都在
 COPY packages/plugin-api/package.json ./packages/plugin-api/package.json
+COPY packages/ai-protocol/package.json ./packages/ai-protocol/package.json
 COPY plugins/package.json ./plugins/package.json
 COPY plugins/csv-tools/package.json ./plugins/csv-tools/package.json
+COPY plugins/ai-agent/package.json ./plugins/ai-agent/package.json
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
     pnpm install --frozen-lockfile --filter backend...
 
@@ -76,6 +78,7 @@ COPY packages ./packages
 ENV DATABASE_URL=postgresql://build:build@127.0.0.1:5432/build
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
     pnpm --filter @pgclouddoc/plugin-api build \
+ && pnpm --filter @pgclouddoc/ai-protocol build \
  && pnpm --filter backend db:generate \
  && pnpm --filter backend build
 

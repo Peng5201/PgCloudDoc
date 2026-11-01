@@ -32,8 +32,10 @@ COPY frontend/package.json ./frontend/package.json
 COPY backend/package.json ./backend/package.json
 # 插件工作区：frontend 依赖 @pgclouddoc/plugin-api；pnpm 同样需要这些 importer
 COPY packages/plugin-api/package.json ./packages/plugin-api/package.json
+COPY packages/ai-protocol/package.json ./packages/ai-protocol/package.json
 COPY plugins/package.json ./plugins/package.json
 COPY plugins/csv-tools/package.json ./plugins/csv-tools/package.json
+COPY plugins/ai-agent/package.json ./plugins/ai-agent/package.json
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
     pnpm install --frozen-lockfile --filter frontend...
 

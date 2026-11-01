@@ -160,6 +160,24 @@ test/              单元测试在 src/ 里随模块；冒烟脚本在 test/
 | GET | `/api/v1/admin/config/:scope/:key/history` | ADMIN | 历史 revision（从 etcd watch 重放） |
 | POST | `/api/v1/admin/config/:scope/:key/rollback` | ADMIN | 回滚到指定 revision（写成新版本） |
 
+### AI 助手 `/api/v1/ai`
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/v1/ai/config` | 是否启用、模型列表、调用限制 |
+| POST | `/api/v1/ai/conversations` | 建会话（可绑定文档） |
+| GET | `/api/v1/ai/conversations?documentId=` | 会话列表 |
+| GET | `/api/v1/ai/conversations/:id` | 会话 + 消息 |
+| PATCH | `/api/v1/ai/conversations/:id` | 改标题 |
+| DELETE | `/api/v1/ai/conversations/:id` | 软删除 |
+| POST | `/api/v1/ai/conversations/:id/turns` | SSE 推进一轮 |
+
+`turns` 的 SSE 事件：`turn_start` / `text_delta` / `tool_call` / `usage` / `turn_end` / `error`。
+工具在浏览器插件里执行；服务端只做模型调用、会话持久化、配额与审计。
+
+供应商配置见 `AI_*` 环境变量。`AI_PROVIDER=mock` 可以在不接外部模型的情况下跑通全链路；
+接真实模型前用 `pnpm ai:probe` 验证流式 + 原生工具调用。
+
 ### 其它
 
 - `GET /health` · `GET /health/ready` · `GET /health/deps`
@@ -252,6 +270,15 @@ test/              单元测试在 src/ 里随模块；冒烟脚本在 test/
 
 ⚠️ 鉴权必须在缓存**之前**。缓存命中时 loader 根本不会执行，
 把鉴权写进 loader 等于「命中缓存就跳过鉴权」。这条被冒烟脚本的热缓存场景覆盖。
+
+### AI 网关：模型在服务端，工具在浏览器
+
+- 服务端不执行文档写入，也不持有引擎；它只把用户输入、历史与文档上下文发给模型，
+  流式返回文本 / `tool_use`，并负责会话持久化、配额与审计。
+- 工具由浏览器插件执行，写入走 `engine.execute`，撤销、协同、只读约束全部由宿主保证。
+- 会话按用户隔离；绑定文档时每轮校验访问权。密钥只存在服务端环境变量，插件包里没有。
+- `sanitizeHistory` 会剔除没有配对结果的 `tool_use`，避免客户端中途关闭导致整轮 400；
+  `trimHistory` 按字符预算丢弃最旧消息，防止长对话撑爆模型上下文。
 
 ### 消息队列
 

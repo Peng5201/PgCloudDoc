@@ -27,6 +27,7 @@ import { HealthModule } from './features/health/health.module';
 import { NotificationsModule } from './features/notifications/notifications.module';
 import { ConfigCenterModule } from './features/config-center/config-center.module';
 import { PluginsModule } from './features/plugins/plugins.module';
+import { AiModule } from './features/ai/ai.module';
 
 @Module({
     imports: [
@@ -118,6 +119,7 @@ import { PluginsModule } from './features/plugins/plugins.module';
         NotificationsModule,
         ConfigCenterModule,
         PluginsModule,
+        AiModule,
     ],
     controllers: [],
     providers: [

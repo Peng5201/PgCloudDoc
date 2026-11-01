@@ -96,6 +96,7 @@ model User {
   auditLogs     AuditLog[]
   accessRequests DocumentAccessRequest[]
   notifications  Notification[]
+  aiConversations AiConversation[]
 
   @@map("users")
 }
@@ -166,6 +167,7 @@ model Document {
   updates  DocumentUpdate[]
   versions DocumentVersion[]
   accessRequests DocumentAccessRequest[]
+  aiConversations AiConversation[]
 
   /// 列表页主查询路径：按用户 + 未删除 + 最近更新排序
   @@index([ownerId, status, updatedAt(sort: Desc)])
@@ -384,4 +386,61 @@ model ProcessedEvent {
   @@unique([topic, partition, msgOffset])
   @@index([processedAt])
   @@map("processed_events")
+}
+
+// ────────────────────────────── AI 助手 ──────────────────────────────
+
+enum AiMessageRole {
+  USER
+  ASSISTANT
+}
+
+enum AiMessageStatus {
+  COMPLETE
+  STREAMING
+  CANCELLED
+  ERROR
+  INTERRUPTED
+}
+
+/// 一次对话。用户私有；绑定文档时只影响上下文与访问校验，不改变归属。
+model AiConversation {
+  id         String   @id @default(uuid()) @map("id")
+  userId     String   @map("user_id")
+  documentId String?  @map("document_id")
+  title      String   @default("新对话") @map("title")
+  provider   String   @map("provider")
+  model      String   @map("model")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  deletedAt  DateTime? @map("deleted_at")
+
+  user     User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  document Document?   @relation(fields: [documentId], references: [id], onDelete: SetNull)
+  messages AiMessage[]
+
+  @@index([userId, updatedAt(sort: Desc)])
+  @@index([documentId])
+  @@map("ai_conversations")
+}
+
+/// 对话消息。按 seq 升序装配模型上下文。
+model AiMessage {
+  id             String          @id @default(uuid()) @map("id")
+  conversationId String          @map("conversation_id")
+  seq            Int             @map("seq")
+  role           AiMessageRole   @map("role")
+  /// { blocks: AiContentBlock[] }，普通 JSON，不存引擎内部对象
+  content        Json            @map("content")
+  status         AiMessageStatus @default(COMPLETE) @map("status")
+  inputTokens    Int?            @map("input_tokens")
+  outputTokens   Int?            @map("output_tokens")
+  cachedTokens   Int?            @map("cached_tokens")
+  createdAt      DateTime        @default(now()) @map("created_at")
+
+  conversation AiConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, seq])
+  @@index([conversationId, createdAt])
+  @@map("ai_messages")
 }
