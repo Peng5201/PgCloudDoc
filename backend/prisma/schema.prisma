@@ -41,11 +41,34 @@ enum MemberRole {
   VIEWER
 }
 
+/// 系统级角色。文档权限是 DocumentMember.role，这里是「能不能进管理后台」
+enum UserRole {
+  USER
+  ADMIN
+}
+
 /// 事务性发件箱状态
 enum OutboxStatus {
   PENDING
   PUBLISHED
   FAILED
+}
+
+/// 插件版本状态。
+/// v1 上传即发布（只有管理员能上传），保留状态位给后续审核流。
+enum PluginVersionStatus {
+  UPLOADED
+  VALIDATED
+  REJECTED
+  PUBLISHED
+  DEPRECATED
+}
+
+/// 插件启用范围。v1 先用 GLOBAL，ROLE/USER 预留给灰度。
+enum PluginScope {
+  GLOBAL
+  ROLE
+  USER
 }
 
 // ────────────────────────────── 用户 ──────────────────────────────
@@ -59,6 +82,8 @@ model User {
   displayName  String?    @map("display_name")
   avatarUrl    String?    @map("avatar_url")
   status       UserStatus @default(ACTIVE) @map("status")
+  /// 系统角色：USER 普通用户，ADMIN 可进管理后台（配置中心）
+  role         UserRole   @default(USER) @map("role")
   /// JWT 里带上它，改密码/封号时自增即可让所有存量 access token 立刻失效
   tokenVersion Int        @default(0) @map("token_version")
   createdAt    DateTime   @default(now()) @map("created_at")
@@ -239,6 +264,71 @@ model Notification {
 }
 
 // ────────────────────────────── 平台 ──────────────────────────────
+
+/// 插件注册表。pluginKey = manifest.id（反向域名）。
+model Plugin {
+  id          String   @id @default(uuid()) @map("id")
+  pluginKey   String   @unique @map("plugin_key")
+  name        String
+  description String?
+  author      String?
+  homepage    String?
+  createdBy   String   @map("created_by")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  versions      PluginVersion[]
+  installations PluginInstallation[]
+
+  @@map("plugins")
+}
+
+/// 不可变版本。同一个 pluginKey + version 只能发布一次。
+model PluginVersion {
+  id          String              @id @default(uuid()) @map("id")
+  pluginId    String              @map("plugin_id")
+  version     String
+  manifest    Json
+  entry       String
+  sha256      String
+  zipBytes    Int                 @map("zip_bytes")
+  assetsBytes Int                 @map("assets_bytes")
+  fileCount   Int                 @map("file_count")
+  status      PluginVersionStatus @default(VALIDATED)
+  pluginApi   String              @map("plugin_api")
+  hostRange   String              @map("host_range")
+  createdBy   String              @map("created_by")
+  createdAt   DateTime            @default(now()) @map("created_at")
+  publishedAt DateTime?           @map("published_at")
+  reviewedBy  String?             @map("reviewed_by")
+  reviewNote  String?             @map("review_note")
+
+  plugin        Plugin               @relation(fields: [pluginId], references: [id], onDelete: Cascade)
+  installations PluginInstallation[]
+
+  @@unique([pluginId, version])
+  @@index([status, publishedAt])
+  @@map("plugin_versions")
+}
+
+/// 启用关系：当前哪个版本生效。
+/// v1 只写 GLOBAL / scopeValue=""；ROLE/USER 预留给灰度和定向测试。
+model PluginInstallation {
+  id              String      @id @default(uuid()) @map("id")
+  pluginId        String      @map("plugin_id")
+  pluginVersionId String      @map("plugin_version_id")
+  scope           PluginScope @default(GLOBAL)
+  scopeValue      String      @default("") @map("scope_value")
+  enabled         Boolean     @default(true)
+  settings        Json?
+  updatedBy       String      @map("updated_by")
+  updatedAt       DateTime    @updatedAt @map("updated_at")
+
+  plugin        Plugin        @relation(fields: [pluginId], references: [id], onDelete: Cascade)
+  pluginVersion PluginVersion @relation(fields: [pluginVersionId], references: [id], onDelete: Cascade)
+
+  @@unique([pluginId, scope, scopeValue])
+  @@map("plugin_installations")
+}
 
 model AuditLog {
   id           String   @id @default(uuid()) @map("id")

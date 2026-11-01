@@ -12,6 +12,7 @@ import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import type { IncomingMessage, Server as HttpServer } from 'node:http';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { AuthService } from '../auth/auth.service';
+import { startWsHeartbeat } from '../../shared/ws-heartbeat';
 
 @Injectable()
 export class NotificationGateway implements OnModuleDestroy {
@@ -69,6 +70,9 @@ export class NotificationGateway implements OnModuleDestroy {
             this.connections.set(userId, set);
         }
         set.add(ws);
+
+        // 和协同连接一样：没有心跳的话，空闲一小时会被 nginx 掐断
+        startWsHeartbeat(ws);
 
         ws.on('close', () => {
             set?.delete(ws);

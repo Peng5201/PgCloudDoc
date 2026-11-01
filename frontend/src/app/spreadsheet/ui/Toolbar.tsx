@@ -10,6 +10,7 @@
 
 import { Button, ColorPicker, Dropdown, Select, Space, Tooltip } from 'antd';
 import type { ReactNode } from 'react';
+import { PluginSlot } from '../../plugins/ui/PluginSlot';
 import {
     HorizontalAlign,
     VerticalAlign,
@@ -201,6 +202,11 @@ export function Toolbar({ engine, state, readOnly = false }: ToolbarProps) {
                     />
                 </Tooltip>
             </Space>
+
+            {/* 插件工具栏：manifest 贡献先渲染，点击时才激活插件 */}
+            <div style={styles.pluginSlot}>
+                <PluginSlot name="sheet.toolbar.end" />
+            </div>
         </div>
     );
 }
@@ -393,5 +399,10 @@ const styles = {
         height: 18,
         background: '#e5e7eb',
         display: 'inline-block',
+    },
+    pluginSlot: {
+        marginLeft: 'auto',
+        display: 'flex',
+        alignItems: 'center',
     },
 };

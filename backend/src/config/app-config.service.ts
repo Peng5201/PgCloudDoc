@@ -74,4 +74,16 @@ export class AppConfigService {
     get collab() {
         return this.cached.collab;
     }
+
+    get etcd() {
+        return this.cached.etcd;
+    }
+
+    get admin() {
+        return this.cached.admin;
+    }
+
+    get plugins() {
+        return this.cached.plugins;
+    }
 }

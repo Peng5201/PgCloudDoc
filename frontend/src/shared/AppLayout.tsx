@@ -5,9 +5,10 @@
 
 import type { ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Avatar, Button, Dropdown, Layout, Space, Typography, message } from 'antd';
+import { Alert, Avatar, Button, Dropdown, Layout, Space, Typography, message } from 'antd';
 import { useAuth } from '../app/auth/AuthContext';
 import { NotificationCenter } from '../app/notifications/NotificationCenter';
+import { useRuntimeConfig } from '../app/config/runtime-config';
 
 const { Header, Content } = Layout;
 const { Text } = Typography;
@@ -21,6 +22,8 @@ export interface AppLayoutProps {
 export function AppLayout({ children, extra }: AppLayoutProps) {
     const { user, logout } = useAuth();
     const navigate = useNavigate();
+    const config = useRuntimeConfig();
+    const isAdmin = user?.role === 'ADMIN';
 
     async function handleLogout() {
         await logout();
@@ -33,19 +36,27 @@ export function AppLayout({ children, extra }: AppLayoutProps) {
             <Header style={styles.header}>
                 <Space size={16}>
                     <Link to="/" style={styles.brand}>
-                        PgCloudDoc
+                        {config.appName}
                     </Link>
                 </Space>
 
-                <Space size={12}>
+                {/* 间距和 extra 内部保持一致（8），否则嵌套 Space 会出现两档间距 */}
+                <Space size={8}>
                     {extra}
                     <NotificationCenter />
                     <Dropdown
                         menu={{
                             items: [
+                                ...(isAdmin
+                                    ? [
+                                          { key: 'admin', label: '管理后台' },
+                                          { type: 'divider' as const },
+                                      ]
+                                    : []),
                                 { key: 'logout', label: '退出登录', danger: true },
                             ],
                             onClick: ({ key }) => {
+                                if (key === 'admin') navigate('/admin');
                                 if (key === 'logout') void handleLogout();
                             },
                         }}
@@ -63,6 +74,15 @@ export function AppLayout({ children, extra }: AppLayoutProps) {
                     </Dropdown>
                 </Space>
             </Header>
+            {config.maintenance.enabled && (
+                <Alert
+                    banner
+                    type="warning"
+                    showIcon
+                    message={config.maintenance.message}
+                    style={{ borderRadius: 0 }}
+                />
+            )}
             <Content style={styles.content}>{children}</Content>
         </Layout>
     );
@@ -89,7 +109,9 @@ const styles = {
         textDecoration: 'none',
     },
     user: {
-        height: 40,
+        // 和顶栏其余操作一样高（32），否则头像/文字会被撑得比图标按钮大一圈
+        height: 32,
+        paddingInline: 8,
         color: '#fff',
     },
     avatar: {

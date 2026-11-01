@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "pnpm --filter @pgclouddoc/plugin-api build",
     "build": "tsc -b && vite build",
+    "prebuild": "pnpm --filter @pgclouddoc/plugin-api build",
     "dev": "vite",
     "preview": "vite preview",
     "test": "vitest run",
@@ -14,6 +16,7 @@
   },
   "dependencies": {
     "@ant-design/icons": "^6.3.4",
+    "@pgclouddoc/plugin-api": "workspace:*",
     "antd": "^6.6.7",
     "lib0": "^0.2.119",
     "react": "^19.1.0",

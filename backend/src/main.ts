@@ -22,6 +22,7 @@ import express from 'express';
 import helmet from 'helmet';
 import compression from 'compression';
 import cookieParser from 'cookie-parser';
+import { resolve } from 'node:path';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import { AppConfigService } from './config/app-config.service';
@@ -106,6 +107,23 @@ async function bootstrap(): Promise<void> {
         ],
         maxAge: 86400, // 预检结果缓存一天
     });
+
+    // ── 插件静态资源 ──
+    // 生产环境由 nginx 直接服务 /plugin-assets/（volume 只读挂载）；
+    // 这里保证本地开发、以及不经过 nginx 的单进程部署也能加载插件。
+    // 路径不可变、版本目录不会被覆盖，所以可以长缓存。
+    app.use(
+        '/plugin-assets',
+        express.static(resolve(config.plugins.storageDir, 'assets'), {
+            index: false,
+            immutable: true,
+            maxAge: '1y',
+            fallthrough: true,
+            setHeaders: (res) => {
+                res.setHeader('X-Content-Type-Options', 'nosniff');
+            },
+        })
+    );
 
     // ── 入参校验 ──
     app.useGlobalPipes(

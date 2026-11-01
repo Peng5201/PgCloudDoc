@@ -7,6 +7,12 @@ dist/
 build/
 *.tsbuildinfo
 
+# Plugin build artifacts
+plugins/*/release/
+
+# 插件运行时产物（本地开发）
+backend/var/
+
 # Logs
 logs/
 *.log

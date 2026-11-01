@@ -23,6 +23,11 @@ export default defineConfig({
         ws: true,
         changeOrigin: true,
       },
+      // 插件静态资源：开发环境由后端 express.static 提供
+      '/plugin-assets': {
+        target: 'http://localhost:3000',
+        changeOrigin: true,
+      },
     },
   },
   build: {

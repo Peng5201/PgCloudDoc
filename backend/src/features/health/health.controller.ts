@@ -23,6 +23,7 @@ import type { Response } from 'express';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service';
 import { RedisService } from '../../infrastructure/redis/redis.service';
 import { KafkaService } from '../../infrastructure/kafka/kafka.service';
+import { EtcdService } from '../../infrastructure/etcd/etcd.service';
 import { Public } from '../../shared/decorators/auth.decorators';
 import { SkipWrap } from '../../shared/interceptors/response.interceptor';
 import { YDocStore } from '../../infrastructure/yjs/ydoc-store';
@@ -42,6 +43,7 @@ export class HealthController {
         private readonly prisma: PrismaService,
         private readonly redis: RedisService,
         private readonly kafka: KafkaService,
+        private readonly etcd: EtcdService,
         private readonly ydocStore: YDocStore
     ) {}
 
@@ -102,7 +104,7 @@ export class HealthController {
             this.timed('kafka', () => this.kafka.ping()),
         ]);
 
-        return [
+        const checks: DependencyStatus[] = [
             {
                 name: 'postgres',
                 status: pg.ok ? 'up' : 'down',
@@ -127,6 +129,21 @@ export class HealthController {
                 ...(kafka.ok ? {} : { detail: kafka.error }),
             },
         ];
+
+        // 配置中心没启用就不出现在健康检查里，避免误报
+        if (this.etcd.enabled) {
+            const etcd = await this.timed('etcd', () => this.etcd.ping());
+            checks.push({
+                // 配置中心挂了：页面仍能打开（用上一份快照），只是后台改不了配置
+                name: 'etcd',
+                status: etcd.ok ? 'up' : 'degraded',
+                critical: false,
+                latencyMs: etcd.latencyMs,
+                ...(etcd.ok ? {} : { detail: etcd.error }),
+            });
+        }
+
+        return checks;
     }
 
     private async timed(

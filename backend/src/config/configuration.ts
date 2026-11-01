@@ -106,6 +106,22 @@ export function buildConfig() {
             minSnapshotIntervalMs: env.COLLAB_MIN_SNAPSHOT_INTERVAL_MS,
             presenceTtlMs: env.COLLAB_PRESENCE_TTL_MS,
         },
+
+        etcd: {
+            /** 空数组 = 关闭配置中心 */
+            endpoints: env.ETCD_ENDPOINTS,
+            username: env.ETCD_USERNAME || undefined,
+            password: env.ETCD_PASSWORD || undefined,
+            configPrefix: env.ETCD_CONFIG_PREFIX.replace(/\/+$/, ''),
+        },
+
+        admin: {
+            bootstrapEmails: env.ADMIN_EMAILS.map((email) => email.toLowerCase()),
+        },
+
+        plugins: {
+            storageDir: env.PLUGIN_STORAGE_DIR,
+        },
     };
 }
 

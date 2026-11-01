@@ -5,6 +5,7 @@
  */
 
 import { Slider, Tooltip } from 'antd';
+import { PluginSlot } from '../../plugins/ui/PluginSlot';
 import { MAX_ZOOM, MIN_ZOOM, type ISheetState, type SheetEngine } from '../engine';
 
 interface StatusBarProps {
@@ -41,6 +42,8 @@ export function StatusBar({ engine, state }: StatusBarProps) {
                     <span style={styles.item}>最大 {formatNumber(stats?.max ?? 0)}</span>
                 </>
             ) : null}
+
+            <PluginSlot name="sheet.statusBar.end" />
 
             <div style={styles.zoomBox}>
                 <Slider

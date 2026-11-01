@@ -21,6 +21,7 @@ PgCloudDoc 是一个**实时协同电子表格**：多个用户可以在浏览�
 | 版本管理 | 手动/异步存档，版本历史可回滚 |
 | 文件互通 | 服务端解析/生成 `.xlsx`，导入即新建文档，导出以服务端 Y.Doc 为准 |
 | 账户体系 | 邮箱/用户名登录、注册，access + refresh 双 token |
+| 配置中心 | etcd 存配置，管理后台下发；前端首屏渲染前加载并反序列化 |
 | 安全边界 | 行级权限（越权一律 404）、限流、审计、软删除 |
 
 它同时是一个**生产级单机部署**的完整范例：前后端同源、容器化、健康检查、异步任务、缓存与令牌轮换都做到了可交付的完备度，而不是最小可用。
@@ -62,8 +63,8 @@ PgCloudDoc/
 │   ├── src/
 │   │   ├── config/         环境变量 zod 校验 + 分层配置
 │   │   ├── shared/         横切：中间件 / 异常过滤器 / 拦截器 / Guard / 装饰器 / 错误码 / 请求上下文
-│   │   ├── infrastructure/  外部系统适配：prisma · redis · kafka（含事务性发件箱） · yjs
-│   │   └── features/       业务能力：auth · users · documents（含 formats/ 工作簿文件格式） · collab · jobs · notifications · health
+│   │   ├── infrastructure/  外部系统适配：prisma · redis · kafka（含事务性发件箱） · yjs · etcd
+│   │   └── features/       业务能力：auth · users · documents（含 formats/ 工作簿文件格式） · collab · jobs · notifications · config-center · health
 │   ├── kafka/        Kafka 单节点配置（开发用）
 │   ├── Dockerfile    多阶段构建：deps → build → prod-deps → migrator → runtime
 │   ├── test/         集成冒烟脚本
@@ -77,6 +78,8 @@ PgCloudDoc/
 │   │   ├── app/editor/       编辑器页
 │   │   ├── app/collab/       CRDT 协同（Y.Doc ↔ 引擎双向桥）
 │   │   ├── app/notifications/ 通知中心（REST 历史 + WS 增量）
+│   │   ├── app/config/       运行时配置（首屏前加载 + 反序列化）
+│   │   ├── app/admin/        配置中心管理后台（/admin）
 │   │   ├── app/spreadsheet/  自研表格引擎（canvas 渲染 + 撤销重做）
 │   │   └── shared/           共享组件（如应用外壳 AppLayout）
 │   ├── Dockerfile    nginx + 静态产物
@@ -108,7 +111,7 @@ pnpm install
 # 2. 复制后端配置
 cp backend/.env.example backend/.env
 
-# 3. 起 PostgreSQL / Redis / Kafka
+# 3. 起 PostgreSQL / Redis / Kafka / etcd
 pnpm --filter backend infra:up
 
 # 4. 初始化数据库（建表 + 存储过程 + 视图）
@@ -149,6 +152,7 @@ pnpm dev
 | PostgreSQL | 5432 | 业务数据 |
 | Redis | 6379 | 缓存 / 限流 / 分布式锁 |
 | Kafka | 9092 | 异步任务（归档、审计）· 生产 compose 另在 `127.0.0.1:9094` 暴露宿主机调试端口 |
+| etcd | 2379 | 配置中心（开发/生产都只给后端访问；生产另绑 `127.0.0.1` 供调试） |
 
 ### 5.3 验证安装
 
@@ -299,9 +303,77 @@ docker exec pgclouddoc-prod-postgres-1 pg_dump -U pgclouddoc pgclouddoc | gzip >
 
 ---
 
-## 7. 总体技术栈与技术细节
+## 7. 配置中心（etcd + 管理后台）
 
-### 7.1 技术栈
+配置的真源是 etcd，浏览器**不直连** etcd：管理后台写 etcd，后端读 etcd 并代理成 `GET /api/v1/config`，前端在首屏渲染前拿到并反序列化。
+
+### 7.1 键位与可见性
+
+```text
+<ETCD_CONFIG_PREFIX>/client/<key>   → 下发给浏览器（匿名可读）
+<ETCD_CONFIG_PREFIX>/server/<key>   → 只给服务端用（永不进公开接口）
+```
+
+前缀按环境分开（开发 `/pgclouddoc/dev/config`，生产 `/pgclouddoc/prod/config`）。键名形如 `app.name`、`maintenance.enabled`、`features.adminConsole`。
+
+etcd 里存的值是 JSON。管理后台写入时套一层信封，附带说明和修改人：
+
+```json
+{ "__meta": 1, "value": "示例文档", "description": "品牌名", "updatedBy": "ops@example.com", "updatedAt": "2026-10-31T12:00:00.000Z" }
+```
+
+用 `etcdctl` 手工写裸 JSON 也兼容（整份内容即 value，元信息为空）。
+
+### 7.2 首屏加载
+
+`frontend/src/main.tsx` 在 `createRoot().render()` **之前** `await loadRuntimeConfig()`：
+
+1. `GET /api/v1/config`（后端返回内存快照，不走 etcd 往返），1.5s 超时；
+2. 失败 → 上一次成功的 localStorage 缓存；
+3. 再失败 → 内置默认值。
+
+配置服务挂了不会白屏，只是用旧值/默认值。等待期间 `index.html` 里有一份内联的启动占位。
+
+前端已知字段：`app.name`（品牌/标题）、`maintenance.enabled` / `maintenance.message`（全局公告）、`features.*`（布尔开关）。其余 key 原样保留在 `values` 里，业务代码按需取。
+
+### 7.3 管理后台
+
+1. 在 `deploy/.env.production`（或 `backend/.env`）里配置 `ADMIN_EMAILS=ops@example.com`；
+2. 先注册该邮箱的账号，再重启后端 —— 启动时自动提升为 `ADMIN`（只升不降）；
+3. 登录后右上角头像菜单出现 **配置中心**，也可以直接访问 `/admin`。
+
+后台能力：
+
+| 功能 | 说明 |
+| --- | --- |
+| 列表 / 新增 / 编辑 / 删除 | 按 client / server 两个 scope 分组 |
+| JSON 校验与格式化 | 保存前必须能 `JSON.parse`，单值上限 64KB |
+| 乐观并发 | 提交携带 etcd revision，被他人改过返回 409，不静默覆盖 |
+| 版本历史 / 回滚 | 从 etcd 历史 revision 重放；回滚本身也是一次新写入 |
+| 公共配置预览 | 直接展示浏览器将要收到的 client 配置 |
+
+### 7.4 接口
+
+| 方法 | 路径 | 权限 | 说明 |
+| --- | --- | --- | --- |
+| GET | `/api/v1/config` | 公开 | `{ version, updatedAt, values }`，`Cache-Control: no-store` |
+| GET | `/api/v1/admin/config` | ADMIN | 列出全部配置 |
+| PUT | `/api/v1/admin/config/:scope/:key` | ADMIN | 新建/更新，body 支持 `expectedRevision` |
+| DELETE | `/api/v1/admin/config/:scope/:key` | ADMIN | 删除 |
+| GET | `/api/v1/admin/config/:scope/:key/history` | ADMIN | 历史版本（最多 100 条） |
+| POST | `/api/v1/admin/config/:scope/:key/rollback` | ADMIN | 回到指定 revision |
+
+### 7.5 可用性边界
+
+- etcd 挂了：页面照常用上一份快照，`/health/deps` 里 etcd 是 `degraded`（不影响就绪），后台写入返回 503；
+- 后端启动**不依赖** etcd 健康，`ETCD_ENDPOINTS` 留空即关闭配置中心；
+- 多实例部署时，各实例通过 etcd watch 收到变更，另有 60s 兜底轮询。
+
+---
+
+## 8. 总体技术栈与技术细节
+
+### 8.1 技术栈
 
 | 层 | 技术 | 用途 |
 | --- | --- | --- |
@@ -313,7 +385,7 @@ docker exec pgclouddoc-prod-postgres-1 pg_dump -U pgclouddoc pgclouddoc | gzip >
 | 消息 | Kafka 3.9（kafkajs） | 异步归档、审计 |
 | 部署 | Docker Compose · nginx | 单机容器化、同源反代 |
 
-### 7.2 架构流
+### 8.2 架构流
 
 ```text
 浏览器 (React + Yjs)
@@ -329,7 +401,7 @@ NestJS 后端
    └── Kafka 事件总线 ──► jobs（归档 / 审计，幂等消费）
 ```
 
-### 7.3 关键设计
+### 8.3 关键设计
 
 更完整的来龙去脉见 [backend/README.md](backend/README.md)，这里摘录要点：
 
@@ -347,11 +419,11 @@ NestJS 后端
 
 **缓存层（Redis）** —— Cache-Aside（`getOrSet` 读穿）/ 滑动窗口限流 / 分布式锁等结构齐全；穿透（空值缓存）、击穿（互斥锁 + 短轮询）、雪崩（TTL ±20% 抖动）都处理；Redis 挂了通过 `safe()` 包装降级直读 PG。
 
-**Excel 导入导出** —— 解析与生成都在服务端（ExcelJS），导入 = 解析 → `applySnapshot` 写入 Y.Doc → 归档；导出 = 基于服务端 Y.Doc 生成文件流。能力概览见 7.4。
+**Excel 导入导出** —— 解析与生成都在服务端（ExcelJS），导入 = 解析 → `applySnapshot` 写入 Y.Doc → 归档；导出 = 基于服务端 Y.Doc 生成文件流。能力概览见 8.4。
 
 **为什么没有 supertest 的 e2e** —— Nest 12 是纯 ESM 包，jest 30 在 Node 22 上不支持 `require(esm)`。所以单元测试只测无框架依赖的纯逻辑，端到端走打真实 HTTP 的冒烟脚本，反而更接近生产路径。
 
-### 7.4 导入导出的数据类型能力
+### 8.4 导入导出的数据类型能力
 
 数据类型边界
 见 [backend/src/features/documents/formats/xlsx/DATA-TYPES.md](backend/src/features/documents/formats/xlsx/DATA-TYPES.md)，这里只列概览：
@@ -364,7 +436,7 @@ NestJS 后端
 - **体量约束**：单次上传 20MB / 单元格 200 万 / 解析在请求线程同步执行
 - **显示层优先级**：`cellText` 依次取 公式原文 → 空串 → `TRUE/FALSE` → 按数字格式渲染 → `String(v)`
 
-### 7.5 文件导入导出
+### 8.5 文件导入导出
 
 服务端负责解析与生成，前端只上传/下载：
 
@@ -386,7 +458,7 @@ NestJS 后端
 
 ```bash
 pnpm --filter backend infra:down   # 停容器
-docker volume rm pgclouddoc_pgdata pgclouddoc_redisdata pgclouddoc_kafkadata
+docker volume rm pgclouddoc_pgdata pgclouddoc_redisdata pgclouddoc_kafkadata pgclouddoc_etcddata
 pnpm --filter backend infra:up     # 起容器（会重新初始化）
 pnpm --filter backend db:deploy    # 重新建表
 ```

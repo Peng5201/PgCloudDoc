@@ -7,6 +7,7 @@
 
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service';
+import { UserRole } from '../../infrastructure/prisma/generated/client';
 
 /** 对外可见的字段集合。所有查询都基于它，从源头杜绝哈希泄漏 */
 export const USER_PUBLIC_SELECT = {
@@ -16,6 +17,8 @@ export const USER_PUBLIC_SELECT = {
     displayName: true,
     avatarUrl: true,
     status: true,
+    /** 系统角色：USER / ADMIN（管理后台权限） */
+    role: true,
     tokenVersion: true,
     createdAt: true,
     updatedAt: true,
@@ -28,6 +31,7 @@ export type UserPublic = {
     displayName: string | null;
     avatarUrl: string | null;
     status: string;
+    role: UserRole;
     tokenVersion: number;
     createdAt: Date;
     updatedAt: Date;
@@ -140,5 +144,31 @@ export class UserRepository {
             emailTaken: byEmail !== null,
             usernameTaken: byUsername !== null,
         };
+    }
+
+    /** 管理后台鉴权用：只取角色，不要为了一个字段读整行 */
+    async findRoleById(id: string): Promise<UserRole | null> {
+        const row = await this.prisma.user.findUnique({
+            where: { id },
+            select: { role: true },
+        });
+        return row?.role ?? null;
+    }
+
+    /**
+     * 启动时按 ADMIN_EMAILS 提升管理员。
+     * 只升不降：环境变量是「保证这些人是管理员」，不是「管理员只有这些人」，
+     * 否则在后台手工加的其它管理员会在下次重启时被悄悄降级。
+     */
+    async promoteToAdminByEmails(emails: string[]): Promise<number> {
+        if (emails.length === 0) return 0;
+        const result = await this.prisma.user.updateMany({
+            where: {
+                email: { in: emails.map((email) => email.toLowerCase()) },
+                role: UserRole.USER,
+            },
+            data: { role: UserRole.ADMIN },
+        });
+        return result.count;
     }
 }

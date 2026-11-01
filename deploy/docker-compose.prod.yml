@@ -53,6 +53,21 @@ x-backend-env: &backend-env
 
   KAFKA_BROKERS: kafka:9092
 
+  # ── 配置中心（etcd）──
+  # 留空 ETCD_ENDPOINTS = 关闭配置中心：/api/v1/config 返回空配置，后台 503。
+  # 注意后端**不依赖** etcd 健康启动：配置中心挂了站点照常可用
+  ETCD_ENDPOINTS: ${ETCD_ENDPOINTS:-etcd:2379}
+  ETCD_CONFIG_PREFIX: ${ETCD_CONFIG_PREFIX:-/pgclouddoc/prod/config}
+  ETCD_USERNAME: ${ETCD_USERNAME:-}
+  ETCD_PASSWORD: ${ETCD_PASSWORD:-}
+
+  # ── 插件产物 ──
+  # backend 写入，nginx 只读挂载同一个卷
+  PLUGIN_STORAGE_DIR: /data/plugins
+
+  # 启动时把这些邮箱提升为管理员（逗号分隔，只升不降）
+  ADMIN_EMAILS: ${ADMIN_EMAILS:-}
+
   JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
   JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
   COOKIE_SECURE: ${COOKIE_SECURE:-false}
@@ -143,6 +158,35 @@ services:
     networks: [data]
     logging: *default-logging
 
+  # 配置中心。单节点足够：数据量极小，丢了可以在后台重建。
+  # 只挂在内部网络，浏览器永远接触不到 etcd。
+  etcd:
+    image: ${ETCD_IMAGE:-quay.io/coreos/etcd:v3.5.17}
+    restart: unless-stopped
+    command:
+      - /usr/local/bin/etcd
+      - --name=pgclouddoc
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd:2380
+      - --initial-cluster=pgclouddoc=http://etcd:2380
+      - --initial-cluster-state=new
+    volumes:
+      - etcddata:/etcd-data
+    ports:
+      # 只绑回环：宿主机上可以用 etcdctl 调试
+      - '127.0.0.1:${ETCD_EXTERNAL_PORT:-2379}:2379'
+    healthcheck:
+      test: ['CMD', 'etcdctl', 'endpoint', 'health']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    networks: [data]
+    logging: *default-logging
+
   # ── 一次性任务：数据库迁移 ──────────────────────────────
   # 放在 tools profile 里，普通的 up 不会顺带跑它；
   # deploy.mjs 用 `--profile tools run --rm migrate` 显式执行，保证每次发版都应用新迁移。
@@ -182,6 +226,8 @@ services:
         condition: service_healthy
     # 等在途请求和 WebSocket 收尾，不给客户端制造 502
     stop_grace_period: 30s
+    volumes:
+      - plugindata:/data/plugins
     healthcheck:
       # readiness：PG 挂了就返回 503，web 不会把流量转进来
       test:
@@ -208,6 +254,9 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+    # 插件静态资源由 nginx 直接服务，只读挂载 backend 写入的卷
+    volumes:
+      - plugindata:/var/lib/pgclouddoc/plugins:ro
     healthcheck:
       test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1/healthz >/dev/null 2>&1']
       interval: 10s
@@ -221,6 +270,8 @@ volumes:
   pgdata:
   redisdata:
   kafkadata:
+  etcddata:
+  plugindata:
 
 networks:
   # 对外：只有 web 和 backend 在

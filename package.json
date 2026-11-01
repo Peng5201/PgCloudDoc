@@ -6,7 +6,12 @@
     "dev": "pnpm -r --parallel dev",
     "dev:frontend": "pnpm --filter frontend dev",
     "dev:backend": "pnpm --filter backend dev",
-    "typecheck": "pnpm -r typecheck",
+    "dev:plugin": "pnpm --filter @pgclouddoc/plugin-csv-tools dev",
+    "dev:plugin:excel": "pnpm --filter @pgclouddoc/plugin-excel-agent dev",
+    "build:plugin-api": "pnpm --filter @pgclouddoc/plugin-api build",
+    "build:plugin": "pnpm --filter @pgclouddoc/plugin-api build && pnpm --filter @pgclouddoc/plugin-csv-tools build && pnpm --filter @pgclouddoc/plugin-excel-agent build",
+    "build:plugin:excel": "pnpm --filter @pgclouddoc/plugin-api build && pnpm --filter @pgclouddoc/plugin-excel-agent build",
+    "typecheck": "pnpm --filter @pgclouddoc/plugin-api build && pnpm -r typecheck",
     "deploy:prod": "node deploy/deploy.mjs",
     "deploy:down": "node deploy/deploy.mjs --down",
     "deploy:logs": "node deploy/deploy.mjs --logs"

@@ -9,6 +9,7 @@ import { PrismaModule } from './infrastructure/prisma/prisma.module';
 import { RedisModule } from './infrastructure/redis/redis.module';
 import { KafkaModule } from './infrastructure/kafka/kafka.module';
 import { YjsModule } from './infrastructure/yjs/yjs.module';
+import { EtcdModule } from './infrastructure/etcd/etcd.module';
 
 import { RequestIdMiddleware } from './shared/middleware/request-id.middleware';
 import { AllExceptionsFilter } from './shared/filters/all-exceptions.filter';
@@ -24,6 +25,8 @@ import { CollabModule } from './features/collab/collab.module';
 import { JobsModule } from './features/jobs/jobs.module';
 import { HealthModule } from './features/health/health.module';
 import { NotificationsModule } from './features/notifications/notifications.module';
+import { ConfigCenterModule } from './features/config-center/config-center.module';
+import { PluginsModule } from './features/plugins/plugins.module';
 
 @Module({
     imports: [
@@ -90,6 +93,7 @@ import { NotificationsModule } from './features/notifications/notifications.modu
         RedisModule,
         KafkaModule,
         YjsModule,
+        EtcdModule,
 
         // 全局限流（Redis 滑动窗口）。个别接口用 @RateLimit 收紧
         ThrottlerModule.forRootAsync({
@@ -112,6 +116,8 @@ import { NotificationsModule } from './features/notifications/notifications.modu
         JobsModule,
         HealthModule,
         NotificationsModule,
+        ConfigCenterModule,
+        PluginsModule,
     ],
     controllers: [],
     providers: [

@@ -1,6 +1,9 @@
 packages:
   - 'frontend'
   - 'backend'
+  - 'packages/*'
+  - 'plugins'
+  - 'plugins/*'
 
 allowBuilds:
   '@parcel/watcher': true

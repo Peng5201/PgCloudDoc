@@ -63,6 +63,7 @@ src/
     redis/         缓存(含穿透/击穿/雪崩) + 限流 + 分布式锁 + Pub/Sub
     kafka/         生产者 / 消费者 / 事务性发件箱 / 事件契约 / 幂等
     yjs/           Y.Doc 结构、materialize/applySnapshot、update 日志持久化
+    etcd/          配置中心客户端（前缀快照 / CAS / 历史重放 / watch）
   features/        业务能力（垂直切片）
     auth/          注册 登录 刷新 登出 + 双 token + OAuth2
     users/         资料
@@ -71,6 +72,7 @@ src/
     collab/        WebSocket 协同服务（y-protocols sync + awareness）
     jobs/          Kafka 消费者（归档/审计/死信）+ cron 清理
     notifications/ 站内信 + WS 推送
+    config-center/ 配置中心（etcd 读写 + 公共配置快照 + 管理接口）
     health/        liveness / readiness / 依赖详情
 test/              单元测试在 src/ 里随模块；冒烟脚本在 test/
 ```
@@ -146,6 +148,17 @@ test/              单元测试在 src/ 里随模块；冒烟脚本在 test/
 | GET | `/unread-count` | 未读数 |
 | POST | `/read` | 标记指定通知已读（`ids`） |
 | POST | `/read-all` | 全部标记已读 |
+
+### 配置中心 `/api/v1/config` · `/api/v1/admin/config`
+
+| 方法 | 路径 | 权限 | 说明 |
+|---|---|---|---|
+| GET | `/api/v1/config` | 公开 | 浏览器首屏配置（仅 client scope），`Cache-Control: no-store` |
+| GET | `/api/v1/admin/config` | ADMIN | 全部配置（client + server） |
+| PUT | `/api/v1/admin/config/:scope/:key` | ADMIN | 新建/更新；`expectedRevision` 做 CAS，冲突 409 |
+| DELETE | `/api/v1/admin/config/:scope/:key` | ADMIN | 删除 |
+| GET | `/api/v1/admin/config/:scope/:key/history` | ADMIN | 历史 revision（从 etcd watch 重放） |
+| POST | `/api/v1/admin/config/:scope/:key/rollback` | ADMIN | 回滚到指定 revision（写成新版本） |
 
 ### 其它
 
@@ -267,6 +280,15 @@ test/              单元测试在 src/ 里随模块；冒烟脚本在 test/
 - **死信有消费者**：落到 `audit_logs`（`action = kafka.dead_letter`），不会成为没人看的黑洞；死信自身失败时不再套娃
 - 事件信封带 `schemaVersion` 与 `correlationId`；消费时把 `correlationId` 灌进请求上下文，日志能和 HTTP 请求串起来
 - 发件箱与幂等表由 cron 定期清理（已投递 7 天 / 失败 30 天 / 幂等记录 7 天）
+
+### 配置中心（etcd）
+
+- **键位**：`<ETCD_CONFIG_PREFIX>/client/<key>` 下发给浏览器，`/server/<key>` 仅服务端可见。公开接口只扫 `client/`，从存储结构上杜绝误暴露。
+- **值**：JSON 文本；管理后台写入时带信封（`__meta/value/description/updatedBy/updatedAt`），也兼容 etcdctl 直接写的裸 JSON。
+- **首屏**：`ConfigCenterService` 启动后维护内存快照，`GET /api/v1/config` 直接返回快照（不走 etcd 往返），并 watch 前缀 + 60s 兜底轮询保持最新；etcd 挂掉时回退上一份快照，失败 5s 内不再重试，避免首屏排队等超时。
+- **并发**：写配置带 etcd modRevision 做 CAS；两个管理员同时编辑时后提交方得到 409，不静默覆盖。
+- **历史/回滚**：etcd 没有「列某键所有版本」的接口，从 `createRevision` 起重放 watch、到当前 revision 立即取消；回滚取历史 revision 的值后写成新版本，回滚本身也可追溯。
+- **可用性**：`ETCD_ENDPOINTS` 留空即关闭；etcd 不参与 `/health/ready` 的致命判定（degraded），应用启动不依赖它。
 
 ### 缓存层（Redis）
 

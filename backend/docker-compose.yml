@@ -1,7 +1,7 @@
 # PgCloudDoc 服务端依赖基础设施。
 #
-# 三个服务：PostgreSQL(数据) / Redis(缓存+限流+协同广播) / Kafka(事件总线)。
-# 全部单节点、KRaft 无 ZooKeeper —— 本地开发用，生产请换成托管集群。
+# 四个服务：PostgreSQL(数据) / Redis(缓存+限流+协同广播) / Kafka(事件总线) /
+# etcd(配置中心)。全部单节点 —— 本地开发用，生产请换成托管集群。
 
 name: pgclouddoc
 
@@ -58,7 +58,33 @@ services:
       timeout: 10s
       retries: 20
 
+  etcd:
+    image: ${ETCD_IMAGE:-quay.io/coreos/etcd:v3.5.17}
+    container_name: pgclouddoc-etcd
+    restart: unless-stopped
+    # 单节点即可：配置中心的数据量极小，丢了也能从管理后台重建
+    command:
+      - /usr/local/bin/etcd
+      - --name=pgclouddoc
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://0.0.0.0:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://0.0.0.0:2380
+      - --initial-cluster=pgclouddoc=http://0.0.0.0:2380
+      - --initial-cluster-state=new
+    ports:
+      - '${ETCD_PORT:-2379}:2379'
+    volumes:
+      - etcddata:/etcd-data
+    healthcheck:
+      test: ['CMD', 'etcdctl', 'endpoint', 'health']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
 volumes:
   pgdata:
   redisdata:
   kafkadata:
+  etcddata:

@@ -45,6 +45,7 @@ import { YDocStore } from '../../infrastructure/yjs/ydoc-store';
 import { DocumentService } from '../documents/document.service';
 import { AuthService } from '../auth/auth.service';
 import { AppConfigService } from '../../config/app-config.service';
+import { startWsHeartbeat } from '../../shared/ws-heartbeat';
 
 /** 与 y-websocket 一致的消息类型 */
 export const MESSAGE_SYNC = 0;
@@ -200,6 +201,10 @@ export class CollabServer implements OnModuleDestroy {
         ws.on('error', (err: Error) => {
             this.logger.debug(`WS 错误 ${client.username}：${err.message}`);
         });
+
+        // 服务端心跳：否则文档挂着一小时没动静，会被 nginx 的
+        // proxy_read_timeout 掐掉；同时能清理半开连接
+        startWsHeartbeat(ws);
 
         this.logger.log(
             `接入协同 ${documentId} user=${username} 在线=${room.clients.size}`

@@ -25,6 +25,15 @@
  * 每条远端改动都会被自己复制一份，指数放大。
  * 所以两处都做了标记：远端写入走 `applySilently`，本地写入带 `LOCAL_ORIGIN`，
  * observer 看到本地 origin 直接跳过。
+ *
+ * ## 后台休眠
+ *
+ * 页面切到后台超过 10s 就主动关闭 WebSocket，回到前台立即重连。
+ * 这里**只动传输层**：Y.Doc、引擎和已经渲染的快照都不变，所以页面上
+ * 只有顶栏的连接状态图标会变（断开 → 连接中 → 已连接）。
+ *
+ * 断开的这段时间如果本地还有没发出去的 update，它们留在 Y.Doc 里；
+ * 重连后的 syncStep1/2 握手会把两边缺的部分补齐，不会丢改动。
  */
 
 import * as Y from 'yjs';
@@ -95,6 +104,11 @@ export interface DocSyncOptions {
     url?: string;
     /** 结构性改动（增删 sheet）后回调，让上层重建引擎 */
     onStructureChange?: () => void;
+    /**
+     * 页面转到后台多久后主动断开 WebSocket（毫秒），回到前台立即重连。
+     * 默认 10s；传 0 关闭该行为。
+     */
+    suspendWhenHiddenMs?: number;
 }
 
 export class DocSync {
@@ -107,6 +121,31 @@ export class DocSync {
     private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     private reconnectAttempts = 0;
     private engine: SheetEngine | null = null;
+
+    private readonly suspendWhenHiddenMs: number;
+    /** 切后台的休眠计时器 */
+    private hiddenTimer: ReturnType<typeof setTimeout> | null = null;
+    /** 是否正因切后台而主动断开了连接（此时不排退避重连） */
+    private suspendedByVisibility = false;
+
+    /** 页面可见性变化：后台计时、回前台立即重连 */
+    private readonly _onVisibilityChange = (): void => {
+        if (this.disposed) return;
+        if (isDocumentHidden()) this.scheduleHiddenSuspend();
+        else this.resumeFromHidden();
+    };
+
+    /**
+     * 用户回到页面的兜底信号。
+     *
+     * 窗口被别的应用盖住再恢复、或页面被浏览器冻结后唤醒时，visibilitychange
+     * 可能延迟到有用户输入才派发 —— 表现就是"鼠标动一下才重连"。
+     * 能产生交互说明人已经看到页面了，直接按「回到前台」处理。
+     */
+    private readonly _onWake = (): void => {
+        if (this.disposed || !this.suspendedByVisibility) return;
+        this.resumeFromHidden();
+    };
 
     /**
      * 本地 update → 发服务端。origin='remote' 的是远端 apply 进来的，
@@ -155,6 +194,7 @@ export class DocSync {
 
     constructor(options: DocSyncOptions) {
         this.options = options;
+        this.suspendWhenHiddenMs = options.suspendWhenHiddenMs ?? HIDDEN_SUSPEND_MS;
         this.awareness = new awarenessProtocol.Awareness(this.doc);
         this.awareness.setLocalStateField('user', {
             id: options.user.id,
@@ -188,6 +228,23 @@ export class DocSync {
 
         // 本地编辑 → 产生 update → 发给服务端，服务端再广播给其他协作者
         this.doc.on('update', this._onUpdate);
+
+        // 切后台超过阈值就断 WS：省服务端连接/心跳，也避免后台标签页一直占着协同房间。
+        // Y.Doc / 引擎 / 快照都不动，回前台只是重新握手。
+        if (this.suspendWhenHiddenMs > 0 && typeof document !== 'undefined') {
+            document.addEventListener('visibilitychange', this._onVisibilityChange);
+            // 在后台标签页里打开时不会再触发一次 visibilitychange，启动即判断
+            if (isDocumentHidden()) this.scheduleHiddenSuspend();
+        }
+        if (this.suspendWhenHiddenMs > 0 && typeof window !== 'undefined') {
+            // 交互兜底：visibilitychange 迟到时也能立刻恢复连接。
+            // pointermove 频率高，handler 只做一次布尔判断，标记 passive 不阻塞滚动
+            window.addEventListener('pointermove', this._onWake, { passive: true });
+            window.addEventListener('pointerdown', this._onWake, { passive: true });
+            window.addEventListener('keydown', this._onWake);
+            window.addEventListener('focus', this._onWake);
+            window.addEventListener('pageshow', this._onWake);
+        }
     }
 
     // ─────────────────────────── 连接 ───────────────────────────
@@ -199,11 +256,11 @@ export class DocSync {
      */
     reconnect(): void {
         if (this.disposed) return;
+        // 强制重连是「明确要连」：后台休眠状态和它的计时器都作废
+        this.suspendedByVisibility = false;
+        this.clearHiddenTimer();
         this.reconnectAttempts = 0;
-        if (this.reconnectTimer) {
-            clearTimeout(this.reconnectTimer);
-            this.reconnectTimer = null;
-        }
+        this.clearReconnectTimer();
         const previous = this.ws;
         this.ws = null;
         if (previous) {
@@ -285,10 +342,14 @@ export class DocSync {
             // onclose 会跟着触发，这里只记日志
             console.warn('[collab] WebSocket 错误');
         };
+
+        // 在后台标签页里建连（比如节流后的强制重连）也要照常计时
+        if (this.suspendWhenHiddenMs > 0 && isDocumentHidden()) this.scheduleHiddenSuspend();
     }
 
     private scheduleReconnect(): void {
-        if (this.disposed || this.reconnectTimer) return;
+        // 后台休眠中不重连 —— 回到前台由 resumeFromHidden 立即建连
+        if (this.disposed || this.reconnectTimer || this.suspendedByVisibility) return;
         // 指数退避，最多 10s 一次 —— 后端重启时别把服务端锤爆
         const delay = Math.min(1000 * 2 ** this.reconnectAttempts, 10_000);
         this.reconnectAttempts++;
@@ -296,6 +357,72 @@ export class DocSync {
             this.reconnectTimer = null;
             this.connect();
         }, delay);
+    }
+
+    // ─────────────────────── 后台休眠 ───────────────────────
+
+    private scheduleHiddenSuspend(): void {
+        if (this.disposed || this.suspendedByVisibility || this.hiddenTimer) return;
+        this.hiddenTimer = setTimeout(() => {
+            this.hiddenTimer = null;
+            // 后台定时器会被浏览器节流，醒来时再确认一次：已经回到前台就不断
+            if (this.disposed || !isDocumentHidden()) return;
+            this.suspendForHidden();
+        }, this.suspendWhenHiddenMs);
+    }
+
+    /**
+     * 主动断掉 WebSocket —— 只动传输层。
+     *
+     * Y.Doc、引擎和已经交给 React 的快照都不碰，所以页面上只有顶栏的
+     * 连接状态图标会变成"已断开"，没有任何数据或布局变化。
+     *
+     * 断线期间本地产生的 update 留在 Y.Doc 里；回到前台后 syncStep1/2
+     * 握手会把两边缺的补齐，不会丢改动。
+     */
+    private suspendForHidden(): void {
+        if (this.disposed || this.suspendedByVisibility) return;
+        this.suspendedByVisibility = true;
+        this.clearReconnectTimer();
+
+        const ws = this.ws;
+        this.ws = null;
+        if (ws) {
+            // 摘掉回调：这是主动断开，不能走「断线 → 指数退避重连」那条路
+            ws.onopen = null;
+            ws.onmessage = null;
+            ws.onerror = null;
+            ws.onclose = null;
+            try {
+                ws.close(1000, 'page-hidden');
+            } catch {
+                // 已经关了就不用管
+            }
+        }
+        this.setStatus({ status: 'disconnected' });
+    }
+
+    /** 回到前台：不等退避，立即重连 */
+    private resumeFromHidden(): void {
+        if (this.disposed) return;
+        this.clearHiddenTimer();
+        if (!this.suspendedByVisibility) return;
+
+        this.suspendedByVisibility = false;
+        this.reconnectAttempts = 0;
+        this.connect();
+    }
+
+    private clearHiddenTimer(): void {
+        if (!this.hiddenTimer) return;
+        clearTimeout(this.hiddenTimer);
+        this.hiddenTimer = null;
+    }
+
+    private clearReconnectTimer(): void {
+        if (!this.reconnectTimer) return;
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
     }
 
     private onMessage(data: Uint8Array): void {
@@ -811,7 +938,19 @@ export class DocSync {
 
     destroy(): void {
         this.disposed = true;
-        if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+        this.suspendedByVisibility = false;
+        if (typeof document !== 'undefined') {
+            document.removeEventListener('visibilitychange', this._onVisibilityChange);
+        }
+        if (typeof window !== 'undefined') {
+            window.removeEventListener('pointermove', this._onWake);
+            window.removeEventListener('pointerdown', this._onWake);
+            window.removeEventListener('keydown', this._onWake);
+            window.removeEventListener('focus', this._onWake);
+            window.removeEventListener('pageshow', this._onWake);
+        }
+        this.clearHiddenTimer();
+        this.clearReconnectTimer();
         if (this.peerFlushTimer !== null) {
             clearTimeout(this.peerFlushTimer);
             this.peerFlushTimer = null;
@@ -845,6 +984,20 @@ export class DocSync {
 
 /** peers 通知的合并窗口：拖选时 awareness 一秒变几十次，没必要每次都重渲染 */
 const PEER_FLUSH_MS = 50;
+
+/** 页面切到后台多久后主动断开协同连接（毫秒） */
+const HIDDEN_SUSPEND_MS = 10_000;
+
+/**
+ * 页面是否在后台。
+ *
+ * 用 document.visibilityState 而不是 window 的 blur：blur 在「点了别的窗口
+ * 但本页还完整可见」时也会触发，那样会把正常查看的用户误断。
+ * 没有 document 的环境（SSR / 单元测试）一律按前台处理。
+ */
+function isDocumentHidden(): boolean {
+    return typeof document !== 'undefined' && document.visibilityState === 'hidden';
+}
 
 function encodeFrame(type: number, payload: Uint8Array): Uint8Array {
     const out = new Uint8Array(payload.byteLength + 1);

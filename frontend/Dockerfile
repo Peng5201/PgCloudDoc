@@ -30,11 +30,18 @@ COPY frontend/package.json ./frontend/package.json
 # backend 的 package.json 也要在：pnpm 按 workspace 解析 lockfile，
 # 缺一个 importer 会认为锁文件过期
 COPY backend/package.json ./backend/package.json
+# 插件工作区：frontend 依赖 @pgclouddoc/plugin-api；pnpm 同样需要这些 importer
+COPY packages/plugin-api/package.json ./packages/plugin-api/package.json
+COPY plugins/package.json ./plugins/package.json
+COPY plugins/csv-tools/package.json ./plugins/csv-tools/package.json
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
-    pnpm install --frozen-lockfile --filter frontend
+    pnpm install --frozen-lockfile --filter frontend...
 
 FROM deps AS build
 COPY frontend ./frontend
+# @pgclouddoc/plugin-api 是 workspace 包，frontend 的 prebuild 会先用它自己的
+# typescript 构建 dist，因此源码必须进 build 层
+COPY packages/plugin-api ./packages/plugin-api
 RUN pnpm --filter frontend build
 
 FROM ${NGINX_IMAGE} AS runtime

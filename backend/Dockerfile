@@ -58,17 +58,25 @@ FROM base AS deps
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY backend/package.json ./backend/package.json
 COPY frontend/package.json ./frontend/package.json
+# 新增 workspace 包后，frozen-lockfile 要求所有 importer 的 package.json 都在
+COPY packages/plugin-api/package.json ./packages/plugin-api/package.json
+COPY plugins/package.json ./plugins/package.json
+COPY plugins/csv-tools/package.json ./plugins/csv-tools/package.json
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
-    pnpm install --frozen-lockfile --filter backend
+    pnpm install --frozen-lockfile --filter backend...
 
 # ─────────────────────────── 构建 ───────────────────────────
 FROM deps AS build
 COPY backend ./backend
+# backend 依赖 workspace 包 @pgclouddoc/plugin-api；它的 tsc 由 --filter backend...
+# 一并安装。dist 必须在 pnpm deploy 之前生成，否则运行镜像里缺协议包。
+COPY packages ./packages
 # prisma generate 不连库，但 prisma.config.ts 在 CLI 加载时会读 DATABASE_URL，
 # 给个占位值，避免因为是 undefined 而报配置错误
 ENV DATABASE_URL=postgresql://build:build@127.0.0.1:5432/build
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
-    pnpm --filter backend db:generate \
+    pnpm --filter @pgclouddoc/plugin-api build \
+ && pnpm --filter backend db:generate \
  && pnpm --filter backend build
 
 # ─────────────────────── 生产依赖（裁剪） ───────────────────────
@@ -93,6 +101,10 @@ FROM ${NODE_IMAGE} AS runtime
 ENV NODE_ENV=production
 
 WORKDIR /app
+
+# 插件产物目录：named volume 首次挂载会继承镜像目录的属主，
+# 不预先 chown 的话，以 node 用户运行的进程写不进 /data/plugins。
+RUN mkdir -p /data/plugins && chown node:node /data/plugins
 
 COPY --from=prod-deps --chown=node:node /out ./
 COPY --from=build --chown=node:node /app/backend/dist ./dist

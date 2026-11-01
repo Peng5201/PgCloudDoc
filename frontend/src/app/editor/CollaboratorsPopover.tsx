@@ -318,7 +318,8 @@ function roleColor(role: Role): string {
 const styles = {
     trigger: {
         height: 32,
-        paddingInline: 10,
+        // 与顶栏图标按钮一致：左右各 8px，图标按钮的 32×32 里也是 8px 侧边距
+        paddingInline: 8,
     },
     triggerInner: {
         display: 'inline-flex',

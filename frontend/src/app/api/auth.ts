@@ -11,6 +11,8 @@ export interface User {
     username: string;
     displayName: string | null;
     avatarUrl: string | null;
+    /** 系统角色。服务端仍然会校验，前端只用来决定是否显示管理后台入口 */
+    role: 'USER' | 'ADMIN';
     createdAt: string;
 }
 

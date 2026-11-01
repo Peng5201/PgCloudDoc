@@ -1,0 +1,58 @@
+{
+  "manifestVersion": 1,
+  "id": "com.pgclouddoc.csv-tools",
+  "name": "CSV 工具",
+  "version": "1.0.0",
+  "description": "把选区导出为 CSV，或向当前工作表写入示例数据",
+  "author": "PgCloudDoc",
+  "entry": "dist/main.js",
+  "engines": {
+    "pgclouddoc": ">=1.0.0 <2.0.0",
+    "pluginApi": "1"
+  },
+  "activationEvents": [
+    "onCommand:csvTools.exportSelection",
+    "onCommand:csvTools.fillDemo"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "id": "csvTools.exportSelection",
+        "title": "导出选区为 CSV",
+        "category": "导出"
+      },
+      {
+        "id": "csvTools.fillDemo",
+        "title": "写入示例数据",
+        "category": "示例"
+      }
+    ],
+    "toolbar": [
+      {
+        "slot": "sheet.toolbar.end",
+        "command": "csvTools.exportSelection",
+        "title": "导出 CSV",
+        "order": 10
+      },
+      {
+        "slot": "sheet.toolbar.end",
+        "command": "csvTools.fillDemo",
+        "title": "填充示例",
+        "order": 20,
+        "requiresWrite": true
+      }
+    ]
+  },
+  "permissions": ["document:read", "document:write"],
+  "settings": [
+    {
+      "key": "delimiter",
+      "type": "enum",
+      "enum": [",", ";", "\t"],
+      "default": ",",
+      "title": "CSV 分隔符",
+      "description": "导出时使用的列分隔符",
+      "scope": "client"
+    }
+  ]
+}

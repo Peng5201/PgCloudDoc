@@ -33,6 +33,9 @@ export class OutboxDispatcher implements OnApplicationBootstrap, OnModuleDestroy
     private timer: NodeJS.Timeout | null = null;
     private running = false;
     private stopped = false;
+    /** 连续失败次数：基础设施抖动时退避，避免每秒重试 + 刷日志 */
+    private consecutiveFailures = 0;
+    private nextAttemptAt = 0;
 
     constructor(
         private readonly prisma: PrismaService,
@@ -53,15 +56,25 @@ export class OutboxDispatcher implements OnApplicationBootstrap, OnModuleDestroy
     }
 
     private async tick(): Promise<void> {
-        if (this.running || this.stopped) return;
+        if (this.running || this.stopped || Date.now() < this.nextAttemptAt) return;
         this.running = true;
         try {
             if (!(await this.kafka.ensureConnected())) return;
             await this.dispatchBatch();
+            this.consecutiveFailures = 0;
         } catch (err) {
-            this.logger.warn(
-                `发件箱投递异常：${err instanceof Error ? err.message : String(err)}`
-            );
+            this.consecutiveFailures += 1;
+            const backoff = Math.min(2 ** this.consecutiveFailures * 1_000, 30_000);
+            this.nextAttemptAt = Date.now() + backoff;
+
+            // 首次失败和每 10 次提示一次，避免基础设施抖动时刷屏
+            if (this.consecutiveFailures === 1 || this.consecutiveFailures % 10 === 0) {
+                this.logger.warn(
+                    `发件箱投递异常（连续 ${this.consecutiveFailures} 次），${backoff}ms 后重试：${
+                        err instanceof Error ? err.message : String(err)
+                    }`
+                );
+            }
         } finally {
             this.running = false;
         }

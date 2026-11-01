@@ -93,6 +93,8 @@ export interface UserDto {
     username: string;
     displayName: string | null;
     avatarUrl: string | null;
+    /** 系统角色。前端据此决定是否显示「管理后台」入口（真正的权限校验在服务端） */
+    role: 'USER' | 'ADMIN';
     createdAt: string;
 }
 
@@ -112,6 +114,7 @@ export function toUserDto(user: {
     username: string;
     displayName: string | null;
     avatarUrl: string | null;
+    role: 'USER' | 'ADMIN';
     createdAt: Date;
 }): UserDto {
     return {
@@ -120,6 +123,7 @@ export function toUserDto(user: {
         username: user.username,
         displayName: user.displayName,
         avatarUrl: user.avatarUrl,
+        role: user.role,
         createdAt: user.createdAt.toISOString(),
     };
 }

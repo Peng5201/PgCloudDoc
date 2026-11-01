@@ -1,0 +1,19 @@
+{
+  "name": "@pgclouddoc/plugin-csv-tools",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "示例插件：把选区导出为 CSV，或向当前工作表写入示例数据",
+  "scripts": {
+    "dev": "vite --config vite.config.ts",
+    "build": "node ../scripts/build-plugin.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@pgclouddoc/plugin-api": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "~5.8.3",
+    "vite": "^6.3.5"
+  }
+}

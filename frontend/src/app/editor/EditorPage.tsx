@@ -12,7 +12,6 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
     App,
-    Badge,
     Button,
     Drawer,
     Dropdown,
@@ -38,6 +37,7 @@ import {
     WifiOutlined,
 } from '@ant-design/icons';
 import { AppLayout } from '../../shared/AppLayout';
+import { PluginSlot, usePluginHost } from '../plugins';
 import { SheetView } from '../spreadsheet/SheetView';
 import type { IRemoteSelection, ISelection, IWorkbookData, SheetEngine } from '../spreadsheet/engine';
 import { useDocSync } from '../collab/useDocSync';
@@ -56,6 +56,7 @@ export function EditorPage() {
     const navigate = useNavigate();
     const { message: messageApi } = App.useApp();
     const { user } = useAuth();
+    const pluginHost = usePluginHost();
 
     const [snapshot, setSnapshot] = useState<IWorkbookData | null>(null);
     const [loading, setLoading] = useState(true);
@@ -92,6 +93,11 @@ export function EditorPage() {
     const peersRef = useRef<Peer[]>([]);
     /** 是否可编辑（角色确认后）。选区广播只看它，避免角色异步加载前的竞态 */
     const canEditRef = useRef(false);
+    /** 插件文档会话读取当前标题的稳态入口（避免闭包拿到旧 docName） */
+    const docNameRef = useRef('');
+    docNameRef.current = docName;
+    /** 当前 engine 属于哪个文档：路由切 id 后，新引擎就绪前不能再挂旧引擎 */
+    const engineDocIdRef = useRef<string | null>(null);
 
     const onStructureChange = useCallback(() => {
         setStructureVersion((v) => v + 1);
@@ -109,6 +115,29 @@ export function EditorPage() {
         const canSeeRemote = myRole === 'OWNER' || myRole === 'EDITOR';
         engineRef.current?.setRemoteSelections(canSeeRemote ? toRemoteSelections(peers) : []);
     }, [peers, myRole]);
+
+    /**
+     * 插件文档会话。
+     *
+     * 引擎就绪时在 handleEngineReady 里挂；如果插件宿主晚于引擎就绪（索引/登录态
+     * 异步），这里补挂一次。同一文档 + 同一 engine 重复 attach 是幂等的。
+     */
+    useEffect(() => {
+        if (!pluginHost) return;
+        const engine = engineRef.current;
+        if (engine && engineDocIdRef.current === id) {
+            pluginHost.attachDocument({
+                id,
+                engine,
+                getTitle: () => docNameRef.current,
+                // 角色尚未确认时 canEditRef 为 false，一律按只读处理
+                canWrite: () => canEditRef.current,
+            });
+        }
+        return () => {
+            pluginHost.detachDocument(id);
+        };
+    }, [pluginHost, id]);
 
     /** 重新加载：先强制重连（普通 connect 对卡死的连接是幂等的），再触发载入流程 */
     const retryLoad = useCallback(() => {
@@ -232,6 +261,16 @@ export function EditorPage() {
             // 结果本地编辑根本进不了 Y.Doc，刷新即丢。
             attach(engine);
             if (engine) {
+                engineDocIdRef.current = id;
+                // 插件通过文档会话读写；写入仍走 engine.execute，协同/撤销不受影响
+                if (pluginHost) {
+                    pluginHost.attachDocument({
+                        id,
+                        engine,
+                        getTitle: () => docNameRef.current,
+                        canWrite: () => canEditRef.current,
+                    });
+                }
                 // 引擎首次就绪时记下内容指纹：之后「要不要保存」都拿它比
                 if (savedFingerprintRef.current === null) {
                     void fingerprintWorkbook(engine.toJSON()).then((fp) => {
@@ -266,7 +305,7 @@ export function EditorPage() {
             }
             return undefined;
         },
-        [attach, docSync]
+        [attach, docSync, id, pluginHost]
     );
 
     // 角色从「未知」确认到「可编辑」后，补一次初始选区广播。
@@ -455,7 +494,9 @@ export function EditorPage() {
                           : '协同服务已断开，改动不会实时同步'
                 }
             >
-                <Badge status={status === 'connected' ? 'success' : 'warning'}>{statusIcon}</Badge>
+                {/* 固定 32×32 的盒子：状态图标必须和两侧图标按钮同尺寸，
+                    否则裸图标会比按钮少 8px 内边距，视觉间距就乱了 */}
+                <span style={styles.statusChip}>{statusIcon}</span>
             </Tooltip>
 
             <Dropdown
@@ -539,6 +580,8 @@ export function EditorPage() {
                         )}
                     </Space>
                     <Space size={8}>
+                        {/* 插件标题栏入口 */}
+                        <PluginSlot name="editor.titleBar.end" />
                         {/* 载入中角色还没确定，先留空 */}
                         {!loading && (
                             <>
@@ -716,6 +759,16 @@ function downloadBlob(blob: Blob, filename: string): void {
 }
 
 const styles = {
+    /** 顶栏图标按钮统一 32×32：图标 16 + 上下左右各 8 的内边距 */
+    statusChip: {
+        display: 'inline-flex',
+        alignItems: 'center' as const,
+        justifyContent: 'center' as const,
+        width: 32,
+        height: 32,
+        fontSize: 14,
+        cursor: 'default',
+    },
     root: {
         display: 'flex',
         flexDirection: 'column' as const,

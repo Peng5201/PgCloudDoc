@@ -1,0 +1,22 @@
+{
+  "name": "@pgclouddoc/plugins",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "PgCloudDoc 插件源码与构建脚本",
+  "scripts": {
+    "dev": "pnpm --filter @pgclouddoc/plugin-csv-tools dev",
+    "dev:csv-tools": "pnpm --filter @pgclouddoc/plugin-csv-tools dev",
+    "dev:excel-agent": "pnpm --filter @pgclouddoc/plugin-excel-agent dev",
+    "build": "pnpm --filter @pgclouddoc/plugin-api build && pnpm --filter @pgclouddoc/plugin-csv-tools build && pnpm --filter @pgclouddoc/plugin-excel-agent build",
+    "build:csv-tools": "node scripts/build-plugin.mjs csv-tools",
+    "build:excel-agent": "node scripts/build-plugin.mjs execl-agent",
+    "typecheck": "pnpm --filter @pgclouddoc/plugin-csv-tools typecheck && pnpm --filter @pgclouddoc/plugin-excel-agent typecheck"
+  },
+  "devDependencies": {
+    "@pgclouddoc/plugin-api": "workspace:*",
+    "archiver": "^5.3.2",
+    "typescript": "~5.8.3",
+    "vite": "^6.3.5"
+  }
+}
