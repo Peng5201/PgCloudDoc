@@ -20,6 +20,7 @@ import { PluginApiError } from '@pgclouddoc/plugin-api/errors';
 import {
   COMMAND_ID_PATTERN,
   MENU_IDS,
+  PANEL_SLOTS,
   PLUGIN_API_VERSION,
   STATUS_BAR_SLOTS,
   TOOLBAR_SLOTS,
@@ -36,10 +37,28 @@ export interface PluginContextDeps {
   hostVersion: string;
   documents: DocumentHub;
   uiStore: PluginUiStore;
+  /** 宿主侧面板。未挂载侧面板容器（列表页/测试）时为空，面板相关 API 退化为 no-op */
+  sidePanel?: PluginSidePanelBridge;
   registerCommand(pluginId: string, commandId: string, handler: CommandHandler): Disposable;
   executeCommand(pluginId: string, commandId: string, ...args: unknown[]): Promise<unknown>;
   notify(level: MessageLevel, message: string): void;
   onError(pluginId: string, error: unknown, context: string): void;
+}
+
+/**
+ * 宿主侧面板的窄接口。
+ * 插件只能看到「显示/收起/是否可见」，看不到宿主视图和 store 本身。
+ */
+export interface PluginSidePanelBridge {
+  /** 视图 id 已含插件前缀 */
+  show(viewId: string): void;
+  hide(): void;
+  isVisible(viewId: string): boolean;
+}
+
+/** 插件面板 id → 宿主视图 id。和 resolveItemId 的拼法保持一致 */
+export function pluginPanelViewId(pluginId: string, panelId: string): string {
+  return `${pluginId}:${panelId}`;
 }
 
 export function createPluginContext(deps: PluginContextDeps): PluginContext {
@@ -158,10 +177,50 @@ export function createPluginContext(deps: PluginContextDeps): PluginContext {
       );
     },
 
-    registerPanel() {
-      // P0 未接入侧栏渲染：先返回空句柄，避免插件在激活阶段直接崩掉
-      logger.info('registerPanel 将在后续阶段接入，本次调用被忽略');
-      return { dispose: () => undefined };
+    registerPanel(panel) {
+      if (!PANEL_SLOTS.includes(panel.slot)) {
+        throw new PluginApiError('E_PLUGIN_INVALID_INPUT', `未知面板插槽：${String(panel.slot)}`);
+      }
+      if (!panel.title?.trim()) {
+        throw new PluginApiError('E_PLUGIN_INVALID_INPUT', '面板的 title 不能为空');
+      }
+      if (!COMMAND_ID_PATTERN.test(panel.id)) {
+        throw new PluginApiError('E_PLUGIN_INVALID_INPUT', `面板 id 不合法：${panel.id}`);
+      }
+      if (typeof panel.mount !== 'function') {
+        throw new PluginApiError(
+          'E_PLUGIN_INVALID_INPUT',
+          `面板 ${panel.id} 必须提供 mount(container)`
+        );
+      }
+
+      return track(
+        deps.uiStore.addPanel({
+          id: resolveItemId(panel.id, 'panel'),
+          pluginId: plugin.id,
+          title: panel.title,
+          iconUrl: resolveIcon(panel.icon),
+          order: panel.order ?? 100,
+          requiresWrite: panel.requiresWrite ?? false,
+          mount: panel.mount,
+        })
+      );
+    },
+
+    showPanel(id) {
+      if (!deps.sidePanel) {
+        logger.info('宿主未挂载侧面板，showPanel 被忽略');
+        return;
+      }
+      deps.sidePanel.show(pluginPanelViewId(plugin.id, id));
+    },
+
+    hidePanel() {
+      deps.sidePanel?.hide();
+    },
+
+    isPanelVisible(id) {
+      return deps.sidePanel?.isVisible(pluginPanelViewId(plugin.id, id)) ?? false;
     },
 
     showMessage(level, message) {

@@ -122,6 +122,25 @@ export class Renderer {
         });
     }
 
+    /**
+     * 容器尺寸变化：立刻重画，不能等下一个 rAF。
+     *
+     * ResizeObserver 回调在「布局之后、绘制之前」执行，这里同步画完，
+     * 浏览器这一帧拿到的就是新尺寸的位图。如果只 invalidate() 等下一帧，
+     * 中间会先画出「旧位图被 CSS 拉伸」的一帧——侧面板展开/收起时
+     * 画布那一下闪烁就是这么来的。
+     */
+    resize(): void {
+        if (this._disposed) return;
+        // 已经排队的重绘被这次同步绘制覆盖，取消掉避免同帧画两遍
+        if (this._rafId !== -1) {
+            cancelAnimationFrame(this._rafId);
+            this._rafId = -1;
+        }
+        this._dirty = false;
+        this.draw();
+    }
+
     dispose(): void {
         this._disposed = true;
         if (this._rafId !== -1) cancelAnimationFrame(this._rafId);

@@ -268,7 +268,7 @@ export class SheetEngine {
         this.renderer.getSelection = () => this.controller.selection;
         this.controller.setReadOnly(this._readOnly);
 
-        this._resizeObserver = new ResizeObserver(() => this.renderer.invalidate());
+        this._resizeObserver = new ResizeObserver(() => this.renderer.resize());
         this._resizeObserver.observe(container);
 
         this.renderer.invalidate();

@@ -20,6 +20,7 @@ import {
 } from 'react';
 import type { MessageLevel } from '@pgclouddoc/plugin-api';
 import { useAuth } from '../../auth/AuthContext';
+import { useSidePanelOptional } from '../../../shared/side-panel';
 import { PluginHost } from './plugin-host';
 
 const PluginHostContext = createContext<PluginHost | null>(null);
@@ -27,6 +28,8 @@ const PluginHostContext = createContext<PluginHost | null>(null);
 export function PluginHostProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth();
   const { message } = AntApp.useApp();
+  /** 宿主侧面板：存在时插件面板会注册进去，不存在时面板 API 退化为 no-op */
+  const sidePanel = useSidePanelOptional();
 
   const notify = useCallback(
     (level: MessageLevel, text: string) => {
@@ -62,6 +65,7 @@ export function PluginHostProvider({ children }: { children: ReactNode }) {
 
     const instance = new PluginHost({
       userId,
+      sidePanel: sidePanel ?? undefined,
       notifier: (level, text) => notifyRef.current(level, text),
     });
     setHost(instance);
@@ -71,7 +75,7 @@ export function PluginHostProvider({ children }: { children: ReactNode }) {
       instance.dispose();
       setHost((current) => (current === instance ? null : current));
     };
-  }, [userId]);
+  }, [userId, sidePanel]);
 
   return <PluginHostContext.Provider value={host}>{children}</PluginHostContext.Provider>;
 }

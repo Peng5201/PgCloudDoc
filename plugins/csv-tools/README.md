@@ -11,7 +11,7 @@
 | id | `com.pgclouddoc.csv-tools` |
 | version | `1.0.0` |
 | entry | `dist/main.js` |
-| 激活事件 | `onCommand:csvTools.exportSelection`、`onCommand:csvTools.fillDemo` |
+| 激活事件 | `onCommand:csvTools.exportSelection`、`onCommand:csvTools.fillDemo`、`onView:csvTools.panel` |
 | 权限 | `document:read`、`document:write` |
 | 设置 | `delimiter`（enum，默认 `,`，可选 `,` `;` `\t`） |
 | 导出 | `activate(ctx)`；未实现 `deactivate` |
@@ -21,8 +21,19 @@
 | 交互对象 | 本插件使用的接口 | 用途 |
 | --- | --- | --- |
 | 文档 | `documents.active()`、`getSelection()`、`getRangeValues()`、`doc.title`、`canWrite`、`transact()`、`tx.setRangeValues()` | 读取选区导出；写入示例数据 |
-| 界面 | manifest 两个命令 + 两个工具栏按钮、`commands.register`、`ui.showMessage` | 提供按钮入口、注册命令、反馈结果 |
+| 界面 | manifest 两个命令 + 两个工具栏按钮 + 一个侧面板、`commands.register`、`ui.registerPanel`、`ui.showMessage` | 提供按钮与面板入口、注册命令、反馈结果 |
 | 服务 | `settings.get('delimiter')`、插件索引、`/plugin-assets/`、开发服务器 | 读取服务端配置、发现插件、加载代码 |
+
+## 侧面板
+
+manifest 里的 `contributes.panels` 只声明元信息：插件未激活时右侧活动栏就能看到「CSV 工具」，点开时才加载插件代码（`onView:csvTools.panel`）。激活后 `ui.registerPanel` 用同一个 id 注册内容，宿主把占位视图替换成真实面板。
+
+| 接口 | 作用与副作用 |
+| --- | --- |
+| `ui.registerPanel({ id, title, slot, mount })` | 把面板挂到宿主给的容器里；返回的清理函数在关闭面板/停用插件时调用 |
+| `mount(container)` 内的 `commands.execute(...)` | 复用已注册命令，面板按钮和工具栏按钮走同一条逻辑 |
+
+面板内容用原生 DOM 写（插件没有共享 React 运行时），样式内联，不依赖宿主主题变量。
 
 ---
 

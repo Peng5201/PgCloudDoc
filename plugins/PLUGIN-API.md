@@ -16,7 +16,7 @@
 - 文档 API 宿主实现：[frontend/src/app/plugins/api/document-api.ts](../frontend/src/app/plugins/api/document-api.ts)
 - 示例插件：[csv-tools](csv-tools/src/index.ts)、[execl-agent](execl-agent/src/index.ts)
 
-> 本文按**当前实现**编写。设计文档中尚未落地的能力（如侧栏面板、菜单渲染、远程 origin）在本文中会明确标注「v1 未接入」，不要按设计稿调用。
+> 本文按**当前实现**编写。设计文档中尚未落地的能力（如菜单渲染、远程 origin）在本文中会明确标注「v1 未接入」，不要按设计稿调用。
 
 ---
 
@@ -211,9 +211,9 @@ Schema 定义在 [packages/plugin-api/src/manifest.ts](../packages/plugin-api/sr
 | 状态栏 | `sheet.statusBar.end` | 是 |
 | 菜单 | `sheet.contextMenu` | 否（已登记，无渲染方） |
 | 菜单 | `editor.more` | 否（已登记，无渲染方） |
-| 面板 | `editor.sidebar` | 否（`registerPanel` 为空实现） |
+| 面板 | `editor.sidebar` | 是（右侧面板；内容在用户打开时才激活插件并挂载） |
 
-> 当前宿主只渲染 `editor.titleBar.end`、`sheet.toolbar.end`、`sheet.statusBar.end` 三处。其余插槽可以声明，但不会出现在界面上，也不会报错。
+> 当前宿主渲染 `editor.titleBar.end`、`sheet.toolbar.end`、`sheet.statusBar.end` 和 `editor.sidebar`（右侧面板）。其余插槽可以声明，但不会出现在界面上，也不会报错。
 
 ### 3.3 settings
 
@@ -260,7 +260,7 @@ Schema 定义在 [packages/plugin-api/src/manifest.ts](../packages/plugin-api/sr
 | `onDocumentOpen` | 打开任意文档编辑页 |
 | `onDocumentOpen:sheet` | 打开表格文档（当前只有表格） |
 | `onCommand:<commandId>` | 该命令被声明为激活事件；必须是 `contributes.commands` 里已声明的命令 |
-| `onView:<viewId>` | v1 未接入（面板不渲染，不会触发） |
+| `onView:<panelId>` | 用户第一次打开该插件声明在 `contributes.panels` 里的面板 |
 
 `activationEvents` 可以为空：此时插件不会被自动激活，但用户点击 manifest 里声明的按钮时，宿主仍会先激活再执行命令（懒激活）。
 
@@ -762,6 +762,9 @@ interface UiApi {
   registerStatusBarItem(item: StatusBarItemOptions): Disposable;
   registerMenuItem(item: MenuItemOptions): Disposable;
   registerPanel(panel: PanelOptions): Disposable;
+  showPanel(id: string): void;
+  hidePanel(): void;
+  isPanelVisible(id: string): boolean;
   showMessage(level: 'info' | 'success' | 'warning' | 'error', message: string): void;
 }
 ```
@@ -787,15 +790,68 @@ interface UiApi {
 | `registerToolbarItem` | `slot` | `editor.titleBar.start` / `editor.titleBar.end` / `sheet.toolbar.start` / `sheet.toolbar.end` |
 | `registerStatusBarItem` | `slot` | `sheet.statusBar.start` / `sheet.statusBar.end` |
 | `registerMenuItem` | `menu` | `sheet.contextMenu` / `editor.more`；可选 `group` |
-| `registerPanel` | `id`、`title`、`slot: 'editor.sidebar'` | v1 **空实现**：只记一条日志并返回空 `Disposable`，不渲染 |
+| `registerPanel` | `id`、`title`、`slot: 'editor.sidebar'`、`mount` | 右侧面板；见 8.3 |
 
-再次强调渲染现状：
+渲染现状：
 
-- 实际渲染的插槽只有 `editor.titleBar.end`、`sheet.toolbar.end`、`sheet.statusBar.end`。
-- `start` 系列、菜单、面板在 v1 都**不会显示**。如果插件必须出现在界面上，请使用 `.end` 插槽。
+- 实际渲染的插槽是 `editor.titleBar.end`、`sheet.toolbar.end`、`sheet.statusBar.end` 和 `editor.sidebar`。
+- `start` 系列和菜单在 v1 **不会显示**。如果插件必须出现在界面上，请使用 `.end` 插槽。
 - 工具栏按钮：有 `icon` 时显示 16×16 图标 + Tooltip；没有 `icon` 时显示文字。
 
-### 8.3 `showMessage(level, message)`
+### 8.3 侧面板：`registerPanel` / `showPanel` / `hidePanel` / `isPanelVisible`
+
+侧面板是宿主的固有容器（编辑器右侧），宿主页面和插件共用：宿主视图按 React 渲染，插件视图按 DOM 容器挂载。
+
+**注册**
+
+```ts
+ctx.ui.registerPanel({
+  id: 'csvTools.panel',          // 插件内唯一
+  title: 'CSV 工具',             // 活动栏 Tooltip + 面板标题
+  slot: 'editor.sidebar',
+  icon: '/icon.svg',             // 可选，活动栏图标
+  order: 100,                    // 可选，越小越靠前
+  requiresWrite: false,          // 可选，只读文档下只显示提示
+  mount(container) {
+    const button = document.createElement('button');
+    button.textContent = '导出选区';
+    button.addEventListener('click', () => ctx.commands.execute('csvTools.exportSelection'));
+    container.appendChild(button);
+    return () => button.remove();   // 面板关闭/插件停用时清理
+  },
+});
+```
+
+- `mount(container)` 拿到的是宿主给的一个 `div`。**不要**替换或移除这个容器本身，只往里追加节点。
+- 返回的函数会在视图切换、面板关闭、插件停用时调用；不返回也不会崩，但残留的监听会泄漏。
+- 同一 `id` 重复注册会替换内容——manifest 占位 → 真实面板就走这条路。
+
+**manifest 声明 + 懒激活**
+
+`contributes.panels` 里的面板在插件未激活时就会出现在活动栏，点开时宿主才加载插件代码（对应 `activationEvents: ["onView:<id>"]`）。插件在 `activate` 里调用 `registerPanel` 补上内容即可：
+
+```json
+{
+  "activationEvents": ["onView:csvTools.panel"],
+  "contributes": {
+    "panels": [{ "id": "csvTools.panel", "title": "CSV 工具", "slot": "editor.sidebar" }]
+  }
+}
+```
+
+**显隐控制**
+
+| 方法 | 作用 |
+| --- | --- |
+| `showPanel(id)` | 打开侧面板并切到该面板（会触发对应插件的 `onView` 激活） |
+| `hidePanel()` | 收起整个侧面板 |
+| `isPanelVisible(id)` | 该面板此刻是否可见（面板打开且它是活动视图） |
+
+`id` 用插件内自己的面板 id，宿主负责加插件前缀；调用不存在的面板不会报错，只会被忽略。
+
+> 为什么是容器而不是 React 组件：宿主还没有 import map / plugin-runtime 共享实例，插件里的 `import 'react'` 解析不到。容器挂载对插件零运行时依赖，也是后续 iframe + RPC 隔离模型的同一套接缝。宿主侧（我们自己的页面）用 React 注册视图，不受影响。
+
+### 8.4 `showMessage(level, message)`
 
 通过宿主 antd 的 `App.useApp()` 实例弹出全局消息，主题/上下文与宿主一致。不要自己 import antd 的静态 `message`。
 

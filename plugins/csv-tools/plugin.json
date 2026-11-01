@@ -12,7 +12,8 @@
   },
   "activationEvents": [
     "onCommand:csvTools.exportSelection",
-    "onCommand:csvTools.fillDemo"
+    "onCommand:csvTools.fillDemo",
+    "onView:csvTools.panel"
   ],
   "contributes": {
     "commands": [
@@ -40,6 +41,13 @@
         "title": "填充示例",
         "order": 20,
         "requiresWrite": true
+      }
+    ],
+    "panels": [
+      {
+        "id": "csvTools.panel",
+        "title": "CSV 工具",
+        "slot": "editor.sidebar"
       }
     ]
   },

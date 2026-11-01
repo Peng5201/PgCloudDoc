@@ -13,13 +13,18 @@ import type {
   PluginModule,
 } from '@pgclouddoc/plugin-api';
 import { PluginApiError } from '@pgclouddoc/plugin-api/errors';
-import { createPluginContext } from '../api/context';
+import type { SidePanelView } from '../../../shared/side-panel';
+import {
+  createPluginContext,
+  pluginPanelViewId,
+  type PluginSidePanelBridge,
+} from '../api/context';
 import { createDocumentHub } from '../api/document-api';
 import { DocumentSessionRegistry, type DocumentSessionOptions } from './document-session';
 import { HOST_VERSION } from './host-version';
 import { injectPluginStyle, loadPluginModule } from './plugin-loader';
 import { loadDiscoveredPlugins, type DiscoveredPlugin } from './plugin-registry';
-import { PluginUiStore } from './ui-store';
+import { PluginUiStore, type PanelItemView } from './ui-store';
 import { joinPluginUrl } from './url';
 
 const ACTIVATE_TIMEOUT_MS = 10_000;
@@ -44,6 +49,30 @@ export interface PluginHostOptions {
   /** 测试/嵌入时覆盖索引来源 */
   loadPlugins?: () => Promise<DiscoveredPlugin[]>;
   onError?: (info: { pluginId: string; context: string; error: unknown }) => void;
+  /** 宿主侧面板（shared/side-panel 的 store）。没有挂载容器时插件面板 API 退化为 no-op */
+  sidePanel?: PluginSidePanelHost;
+}
+
+/** 宿主侧面板的窄接口，由 SidePanelStore 结构实现 */
+export interface PluginSidePanelHost {
+  register(view: SidePanelView): { dispose(): void };
+  show(id?: string): void;
+  hide(): void;
+  isVisible(id: string): boolean;
+}
+
+/** manifest 里声明的面板：插件未激活时先占个位 */
+interface ManifestPanelMeta {
+  pluginId: string;
+  title: string;
+  iconUrl?: string;
+  order: number;
+}
+
+interface PanelViewEntry {
+  /** 来源项：运行时注册的面板对象；null 表示 manifest 占位 */
+  source: PanelItemView | null;
+  disposable: Disposable;
 }
 
 export class PluginHost {
@@ -56,6 +85,11 @@ export class PluginHost {
   private readonly runtimes = new Map<string, PluginRuntime>();
   private readonly commands = new Map<string, RegisteredCommand>();
   private readonly manifestUiDisposables: Disposable[] = [];
+  /** 已注册到宿主侧面板的视图（运行时面板与 manifest 占位共用一张表） */
+  private readonly panelViews = new Map<string, PanelViewEntry>();
+  /** manifest 声明的面板元信息，插件停用后用来恢复占位视图 */
+  private readonly manifestPanels = new Map<string, ManifestPanelMeta>();
+  private readonly sidePanelBridge: PluginSidePanelBridge | undefined;
 
   private disposed = false;
   private initializePromise: Promise<void> | null = null;
@@ -68,6 +102,18 @@ export class PluginHost {
         const log = level === 'error' ? console.error : level === 'warning' ? console.warn : console.info;
         log(`[plugins] ${message}`);
       });
+
+    const sidePanel = options.sidePanel;
+    this.sidePanelBridge = sidePanel
+      ? {
+          show: (viewId) => sidePanel.show(viewId),
+          hide: () => sidePanel.hide(),
+          isVisible: (viewId) => sidePanel.isVisible(viewId),
+        }
+      : undefined;
+
+    // 运行时面板注册/释放都落在这里：ui-store 只存数据，视图注册由宿主完成
+    this.ui.subscribe(() => this.syncPanels());
   }
 
   setNotifier(notifier: (level: MessageLevel, message: string) => void): void {
@@ -120,6 +166,16 @@ export class PluginHost {
       }
     }
     this.manifestUiDisposables.length = 0;
+
+    for (const entry of this.panelViews.values()) {
+      try {
+        entry.disposable.dispose();
+      } catch {
+        // 视图释放失败不影响其余清理
+      }
+    }
+    this.panelViews.clear();
+    this.manifestPanels.clear();
 
     this.ui.clear();
     this.commands.clear();
@@ -196,6 +252,7 @@ export class PluginHost {
         hostVersion: HOST_VERSION,
         documents: documentHub.hub,
         uiStore: this.ui,
+        sidePanel: this.sidePanelBridge,
         registerCommand: (pluginId, commandId, handler) =>
           this.registerCommand(pluginId, commandId, handler),
         executeCommand: (pluginId, commandId, ...args) =>
@@ -403,6 +460,86 @@ export class PluginHost {
         })
       );
     }
+
+    // 面板只登记元信息：内容要等插件激活后通过 registerPanel 提供。
+    // 这里先放一个占位视图，用户点开时才触发激活（onView 懒激活模型）。
+    for (const item of contributes.panels ?? []) {
+      if (item.slot !== 'editor.sidebar') continue;
+      this.manifestPanels.set(pluginPanelViewId(plugin.id, item.id), {
+        pluginId: plugin.id,
+        title: item.title,
+        iconUrl: item.icon ? joinPluginUrl(plugin.baseUrl, item.icon) : undefined,
+        order: 100,
+      });
+    }
+
+    this.syncPanels();
+  }
+
+  // ─────────────────────────── 侧面板 ───────────────────────────
+
+  /**
+   * 把「manifest 占位 + 运行时面板」同步成宿主侧面板里的视图。
+   *
+   * 运行时面板优先；插件停用后面板被释放，自动退回占位视图。
+   * 用来源对象做幂等判断：工具栏/状态栏的变动也会触发 bump，不能每次都重建视图。
+   */
+  private syncPanels(): void {
+    const sidePanel = this.options.sidePanel;
+    if (!sidePanel || this.disposed) return;
+
+    const runtime = new Map(this.ui.panelItems().map((item) => [item.id, item] as const));
+    const desired = new Set<string>([...this.manifestPanels.keys(), ...runtime.keys()]);
+
+    // 先摘掉内容已经变化（或来源消失）的视图
+    for (const [id, entry] of [...this.panelViews]) {
+      const nextSource = runtime.get(id) ?? null;
+      if (!desired.has(id) || entry.source !== nextSource) {
+        entry.disposable.dispose();
+        this.panelViews.delete(id);
+      }
+    }
+
+    // 再补上缺失的视图
+    for (const id of desired) {
+      if (this.panelViews.has(id)) continue;
+      const item = runtime.get(id) ?? null;
+      const view = item ? this.runtimePanelView(item) : this.manifestPanelView(id);
+      if (!view) continue;
+      this.panelViews.set(id, { source: item, disposable: sidePanel.register(view) });
+    }
+  }
+
+  private runtimePanelView(item: PanelItemView): SidePanelView {
+    return {
+      id: item.id,
+      title: item.title,
+      icon: item.iconUrl,
+      order: item.order,
+      owner: { kind: 'plugin', pluginId: item.pluginId },
+      requiresWrite: item.requiresWrite,
+      mount: item.mount,
+      onFirstShow: () => {
+        void this.ensureActivated(item.pluginId);
+      },
+    };
+  }
+
+  private manifestPanelView(viewId: string): SidePanelView | null {
+    const meta = this.manifestPanels.get(viewId);
+    if (!meta) return null;
+    return {
+      id: viewId,
+      title: meta.title,
+      icon: meta.iconUrl,
+      order: meta.order,
+      owner: { kind: 'plugin', pluginId: meta.pluginId },
+      pending: true,
+      // 打开占位视图 = 用户要这个插件的面板，按 onView 语义激活它
+      onFirstShow: () => {
+        void this.ensureActivated(meta.pluginId);
+      },
+    };
   }
 
   private commandTitle(plugin: DiscoveredPlugin, commandId: string): string | undefined {

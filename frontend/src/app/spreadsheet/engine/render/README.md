@@ -28,12 +28,13 @@ SheetEngine 构造函数
    │  new Renderer(container)                            index.ts:209  ← 入口
    │  renderer.skeleton / worksheet / styles / zoom = …  index.ts:227-230
    │  renderer.getSelection = …                          index.ts:268
-   │  ResizeObserver → renderer.invalidate()             index.ts:271
+   │  ResizeObserver → renderer.resize()                index.ts:271
    │  renderer.invalidate()  ← 触发第一帧                index.ts:274
    ▼
 Renderer (renderer.ts)
    │  createElement('canvas') 挂到 container            renderer.ts:74
    │  invalidate() → rAF → draw()                       renderer.ts:114 / 166
+   │  resize() → 同步 draw()（尺寸变化不等下一帧）        renderer.ts:130
 ```
 
 对应文件：
@@ -49,7 +50,7 @@ Renderer (renderer.ts)
 - **`getSelection` 是 getter 不是快照**：交互层会整体替换 selection 对象，存快照会过期。
 - **远端选区由协同层灌入**：`SheetEngine.setRemoteSelections()` → `renderer.remoteSelections`，渲染层只读消费。
 - **只读模式不重建引擎**：`readOnly` 变化走 `engine.setReadOnly()`，重建会丢滚动位置和选区。
-- **重绘只有一条路**：各处调 `renderer.invalidate()` —— 数据变更、`ResizeObserver`、滚动/缩放/选区，都汇聚到这一个方法。
+- **重绘只有一条路**：数据变更、滚动/缩放/选区都调 `renderer.invalidate()`；唯一的例外是容器尺寸变化（`ResizeObserver` → `renderer.resize()`），它必须同步重绘，见下文「尺寸变化同步重绘」。
 - **导出只是便利**：`engine/index.ts` re-export `Renderer`，外部 `import { Renderer } from '../engine'`；但装配只发生这一次，别在别处再 `new`。
 
 ---
@@ -112,6 +113,14 @@ renderer.draw()
 ### 3. 脏标记 + rAF 合帧
 
 `invalidate()` 只把 `_dirty` 置位，真正的 `draw()` 丢给 `requestAnimationFrame`。连续输入 20 个字符只重绘 1 次，而不是每字一帧。
+
+### 3.1 尺寸变化同步重绘
+
+容器宽高变化走的是 `resize()`，同步 `draw()`，不走 rAF。
+
+ResizeObserver 回调在「布局之后、绘制之前」执行：这时同步画完，浏览器这一帧拿到的就是新尺寸的位图。如果只标脏等下一个 rAF，中间会先画出「旧位图被 CSS 拉伸」的一帧 —— 侧面板展开/收起、拖拽改宽时画布闪一下就是这个原因。
+
+`resize()` 会取消已排队的 rAF，避免同一帧画两遍。
 
 ### 4. 前缀和 O(1) 定位
 

@@ -9,6 +9,7 @@ import { LoginPage } from './app/auth/LoginPage';
 import { DocumentListPage } from './app/documents/DocumentListPage';
 import { EditorPage } from './app/editor/EditorPage';
 import { PluginHostProvider } from './app/plugins';
+import { SidePanelProvider } from './shared/side-panel';
 
 /**
  * 管理后台按需加载：只有管理员真的点进去才下载这份代码，
@@ -35,8 +36,9 @@ export default function App() {
             <AntApp>
                 <BrowserRouter>
                     <AuthProvider>
-                        <PluginHostProvider>
-                            <Routes>
+                        <SidePanelProvider>
+                            <PluginHostProvider>
+                                <Routes>
                                 <Route path="/login" element={<LoginPage />} />
                                 <Route
                                     path="/"
@@ -78,6 +80,7 @@ export default function App() {
                                 <Route path="*" element={<Navigate to="/" replace />} />
                             </Routes>
                         </PluginHostProvider>
+                        </SidePanelProvider>
                     </AuthProvider>
                 </BrowserRouter>
             </AntApp>

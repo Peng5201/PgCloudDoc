@@ -12,6 +12,7 @@
 import { describe, expect, it } from 'vitest';
 import { PluginHost } from '../src/app/plugins/host/plugin-host';
 import type { DiscoveredPlugin } from '../src/app/plugins/host/plugin-registry';
+import { SidePanelStore } from '../src/shared/side-panel/store';
 import {
     History,
     Workbook,
@@ -209,5 +210,115 @@ describe('插件宿主', () => {
             delete (globalThis as typeof globalThis & { __pluginTestResult?: unknown })
                 .__pluginTestResult;
         }
+    });
+});
+
+/** 侧面板：manifest 占位 → 用户打开 → 懒激活 → 运行时面板替换 */
+const PANEL_PLUGIN_ID = 'com.test.panel-demo';
+const panelModuleSource = `
+export async function activate(ctx) {
+    ctx.ui.registerPanel({
+        id: 'demo.panel',
+        title: '运行时面板',
+        slot: 'editor.sidebar',
+        mount(container) {
+            container.textContent = 'panel-mounted';
+            return () => container.replaceChildren();
+        }
+    });
+    globalThis.__pluginPanelVisible = ctx.ui.isPanelVisible('demo.panel');
+}
+`;
+
+const panelPlugin: DiscoveredPlugin = {
+    id: PANEL_PLUGIN_ID,
+    version: '1.0.0',
+    baseUrl: '/',
+    entry: `data:text/javascript;charset=utf-8,${encodeURIComponent(panelModuleSource)}`,
+    engines: { pgclouddoc: '>=1.0.0 <2.0.0', pluginApi: '1' },
+    activationEvents: ['onView:demo.panel'],
+    contributes: {
+        panels: [{ id: 'demo.panel', title: '示例面板', slot: 'editor.sidebar' }],
+    },
+    permissions: [],
+    settings: {},
+    source: 'dev',
+};
+
+function memoryStorage() {
+    let prefs: import('../src/shared/side-panel/types').SidePanelPrefs | null = null;
+    return {
+        read: () => prefs,
+        write: (next: import('../src/shared/side-panel/types').SidePanelPrefs) => {
+            prefs = next;
+        },
+    };
+}
+
+describe('插件侧面板', () => {
+    it('manifest 先占位，打开时激活插件并替换成真实面板', async () => {
+        const sidePanel = new SidePanelStore({ storage: memoryStorage() });
+        const host = new PluginHost({
+            userId: 'user-1',
+            loadPlugins: async () => [panelPlugin],
+            sidePanel,
+        });
+
+        try {
+            await host.initialize();
+
+            const viewId = `${PANEL_PLUGIN_ID}:demo.panel`;
+            const placeholder = sidePanel.getSnapshot().views.find((view) => view.id === viewId);
+            // 插件代码没执行，活动栏里已经有入口
+            expect(placeholder?.title).toBe('示例面板');
+            expect(placeholder?.pending).toBe(true);
+            expect(placeholder?.owner).toEqual({ kind: 'plugin', pluginId: PANEL_PLUGIN_ID });
+
+            // 打开面板 = 触发 onView 懒激活
+            sidePanel.show(viewId);
+            expect(await host.ensureActivated(PANEL_PLUGIN_ID)).toBe(true);
+
+            const view = sidePanel.getSnapshot().views.find((item) => item.id === viewId);
+            expect(view?.title).toBe('运行时面板');
+            expect(view?.pending).toBeUndefined();
+            expect(typeof view?.mount).toBe('function');
+            expect(sidePanel.isVisible(viewId)).toBe(true);
+
+            // 插件侧的 isPanelVisible 走的是同一条状态
+            expect(
+                (globalThis as typeof globalThis & { __pluginPanelVisible?: boolean })
+                    .__pluginPanelVisible
+            ).toBe(true);
+
+            // Node 环境没有真实 DOM，验证的是挂载函数被调用、内容写进了容器
+            const container = {
+                textContent: '',
+                replaceChildren: () => undefined,
+            } as unknown as HTMLElement;
+            view?.mount?.(container);
+            expect(container.textContent).toBe('panel-mounted');
+        } finally {
+            host.dispose();
+            delete (globalThis as typeof globalThis & { __pluginPanelVisible?: boolean })
+                .__pluginPanelVisible;
+        }
+    });
+
+    it('插件停用后面板从活动栏移除', async () => {
+        const sidePanel = new SidePanelStore({ storage: memoryStorage() });
+        const host = new PluginHost({
+            userId: 'user-1',
+            loadPlugins: async () => [panelPlugin],
+            sidePanel,
+        });
+
+        await host.initialize();
+        const viewId = `${PANEL_PLUGIN_ID}:demo.panel`;
+        expect(sidePanel.getSnapshot().views.map((view) => view.id)).toEqual([viewId]);
+
+        host.dispose();
+
+        expect(sidePanel.getSnapshot().views).toEqual([]);
+        expect(sidePanel.getSnapshot().activeId).toBeNull();
     });
 });

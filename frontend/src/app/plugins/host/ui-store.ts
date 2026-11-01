@@ -31,10 +31,22 @@ export interface MenuItemView extends UiItem {
   group?: string;
 }
 
+/** 面板视图。内容是容器挂载函数（插件侧无 React 运行时） */
+export interface PanelItemView {
+  id: string;
+  pluginId: string;
+  title: string;
+  iconUrl?: string;
+  order: number;
+  requiresWrite: boolean;
+  mount: (container: HTMLElement) => void | (() => void);
+}
+
 export class PluginUiStore {
   private readonly toolbar = new Map<string, ToolbarItemView>();
   private readonly statusBar = new Map<string, StatusBarItemView>();
   private readonly menus = new Map<string, MenuItemView>();
+  private readonly panels = new Map<string, PanelItemView>();
   private readonly listeners = new Set<() => void>();
   private version = 0;
 
@@ -77,6 +89,16 @@ export class PluginUiStore {
     };
   }
 
+  addPanel(item: PanelItemView): Disposable {
+    this.panels.set(item.id, item);
+    this.bump();
+    return {
+      dispose: () => {
+        if (this.panels.delete(item.id)) this.bump();
+      },
+    };
+  }
+
   toolbarItems(slot: ToolbarSlot): ToolbarItemView[] {
     return [...this.toolbar.values()]
       .filter((item) => item.slot === slot)
@@ -95,10 +117,17 @@ export class PluginUiStore {
       .sort((a, b) => a.order - b.order || a.title.localeCompare(b.title));
   }
 
+  panelItems(): PanelItemView[] {
+    return [...this.panels.values()].sort(
+      (a, b) => a.order - b.order || a.title.localeCompare(b.title)
+    );
+  }
+
   clear(): void {
     this.toolbar.clear();
     this.statusBar.clear();
     this.menus.clear();
+    this.panels.clear();
     this.bump();
   }
 

@@ -627,7 +627,7 @@ v1 插槽清单：
 | `sheet.toolbar.start` / `.end` | 表格工具栏两端 | 按钮、下拉菜单 |
 | `sheet.statusBar.start` / `.end` | 状态栏 | 文本 / 小按钮 |
 | `sheet.contextMenu` | 单元格右键菜单 | 菜单项 |
-| `editor.sidebar` | 编辑器右侧抽屉面板 | 插件 React 面板 |
+| `editor.sidebar` | 编辑器右侧面板（宿主级容器，见 5.5.1） | 插件容器面板 |
 | `documents.list.header` | 文档列表页顶部（P2） | 按钮 |
 
 插槽渲染：
@@ -637,6 +637,19 @@ v1 插槽清单：
 ```
 
 宿主按注册顺序渲染，每个条目用 `key={pluginId + itemId}` 包 ErrorBoundary；`readOnly` 文档下宿主可以按贡献的 `requiresWrite` 自动禁用。
+
+#### 5.5.1 侧面板是宿主固有能力
+
+右侧面板不归插件系统所有，而是宿主的基础设施（`frontend/src/shared/side-panel`）：
+
+- **一个容器**：活动栏 + 标题栏 + 内容区，可拖拽改宽、可整体收起，宽度与开合状态持久化到 `localStorage`。
+- **一个 store**：宿主页面和插件宿主往同一张视图表里注册，显示的始终只有一个视图。
+- **两种内容形态**：
+  - 宿主页面用 `render: () => ReactNode`（`useSidePanelView` / `sidePanel.register`），页面卸载时自动注销；
+  - 插件用 `mount(container)` 容器挂载。宿主的共享 React 运行时（import map）尚未落地，容器挂载让插件零运行时依赖，同时是后续 iframe + RPC 隔离模型的同一套接缝。
+- **显隐接口**：`show/hide/toggle/activate` 在宿主侧；插件侧对应 `ui.showPanel` / `ui.hidePanel` / `ui.isPanelVisible`。
+- **懒激活**：manifest `contributes.panels` 只登记元信息，宿主先放占位视图；用户打开时触发 `onView:<id>`，插件激活后用同 id 的 `registerPanel` 替换内容。
+- **失败隔离**：每个视图独立 ErrorBoundary；插件挂载抛错只影响该面板，活动栏和其他视图照常工作。
 
 ### 5.6 文档会话桥
 

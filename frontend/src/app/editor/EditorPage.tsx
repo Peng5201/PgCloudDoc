@@ -13,11 +13,8 @@ import { useNavigate, useParams } from 'react-router-dom';
 import {
     App,
     Button,
-    Drawer,
     Dropdown,
     Input,
-    List,
-    Popconfirm,
     Result,
     Space,
     Spin,
@@ -37,16 +34,18 @@ import {
     WifiOutlined,
 } from '@ant-design/icons';
 import { AppLayout } from '../../shared/AppLayout';
+import { SidePanelArea, useSidePanel } from '../../shared/side-panel';
 import { PluginSlot, usePluginHost } from '../plugins';
 import { SheetView } from '../spreadsheet/SheetView';
 import type { IRemoteSelection, ISelection, IWorkbookData, SheetEngine } from '../spreadsheet/engine';
 import { useDocSync } from '../collab/useDocSync';
 import type { Peer } from '../collab/doc-sync';
-import { documentsApi, type DocumentVersion, type Member } from '../api/documents';
+import { documentsApi, type Member } from '../api/documents';
 import { ApiError } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
 import { AccessRequestPanel } from './AccessRequestPanel';
 import { CollaboratorsPopover } from './CollaboratorsPopover';
+import { VersionHistoryPanel } from './VersionHistoryPanel';
 import { fingerprintWorkbook } from './workbook-fingerprint';
 
 const { Text } = Typography;
@@ -65,9 +64,8 @@ export function EditorPage() {
     const [saving, setSaving] = useState(false);
     const [exportingXlsx, setExportingXlsx] = useState(false);
     const [dirty, setDirty] = useState(false);
-    const [versionsOpen, setVersionsOpen] = useState(false);
-    const [versions, setVersions] = useState<DocumentVersion[]>([]);
-    const [versionsLoading, setVersionsLoading] = useState(false);
+    /** 保存/回滚后递增：版本历史面板据此重新拉列表 */
+    const [versionsRefreshToken, setVersionsRefreshToken] = useState(0);
     /** 远端改了文档结构（增删 sheet），要整体重建引擎 */
     const [structureVersion, setStructureVersion] = useState(0);
     /** 文档名点开编辑态 */
@@ -346,7 +344,8 @@ export function EditorPage() {
                 // 服务端按内容哈希判定内容没变，没有新增版本
                 messageApi.info('没有改动，不用保存');
             }
-            if (versionsOpen) void loadVersions();
+            // 面板开着的话让它重新拉一次，新版本立刻可见
+            setVersionsRefreshToken((t) => t + 1);
         } catch (err) {
             messageApi.error(err instanceof ApiError ? err.message : '保存失败');
         } finally {
@@ -374,38 +373,50 @@ export function EditorPage() {
         return () => window.removeEventListener('keydown', onKeyDown);
     }, []);
 
-    async function loadVersions() {
-        setVersionsLoading(true);
-        try {
-            setVersions(await documentsApi.versions(id));
-        } catch (err) {
-            messageApi.error(err instanceof ApiError ? err.message : '加载版本失败');
-        } finally {
-            setVersionsLoading(false);
-        }
-    }
+    // ────────────────────────── 侧面板 ──────────────────────────
 
-    function openVersions() {
-        setVersionsOpen(true);
-        void loadVersions();
-    }
+    const sidePanel = useSidePanel();
+    const versionsViewId = `${id}:versions`;
 
-    async function handleRestore(versionNo: number) {
-        try {
-            await documentsApi.restoreVersion(id, versionNo);
-            messageApi.success(`已回滚到版本 ${versionNo}`);
-            setVersionsOpen(false);
-            // 回滚会重写 Y.Doc，协同层会把新状态推过来；这里也主动刷一次
-            if (docSync) {
-                setSnapshot(docSync.materialize());
-            }
-            // 回滚本身已经归档了一版，基线交给重建后的引擎重新建立
-            savedFingerprintRef.current = null;
-            setDirty(false);
-        } catch (err) {
-            messageApi.error(err instanceof ApiError ? err.message : '回滚失败');
-        }
-    }
+    /** 回滚会重写 Y.Doc：重建快照、重置存档基线，交给协同层把新状态推过来 */
+    const handleRestored = useCallback(() => {
+        if (docSync) setSnapshot(docSync.materialize());
+        // 回滚本身已经归档了一版，基线交给重建后的引擎重新建立
+        savedFingerprintRef.current = null;
+        setDirty(false);
+    }, [docSync]);
+
+    // 版本历史注册成宿主视图：面板自己拉数据，编辑器只负责提供上下文。
+    // 文档还没就绪（载入中 / 无权限 / 打不开）时不注册，免得活动栏出现一个必然报错的面板。
+    useEffect(() => {
+        if (loading || accessDenied || loadError) return;
+
+        const disposable = sidePanel.register({
+            id: versionsViewId,
+            title: '版本历史',
+            icon: <HistoryOutlined />,
+            owner: { kind: 'host' },
+            render: () => (
+                <VersionHistoryPanel
+                    documentId={id}
+                    readOnly={isReadonly}
+                    refreshToken={versionsRefreshToken}
+                    onRestored={handleRestored}
+                />
+            ),
+        });
+        return () => disposable.dispose();
+    }, [
+        sidePanel,
+        versionsViewId,
+        id,
+        isReadonly,
+        versionsRefreshToken,
+        handleRestored,
+        loading,
+        accessDenied,
+        loadError,
+    ]);
 
     function handleExport() {
         const engine = engineRef.current;
@@ -520,7 +531,7 @@ export function EditorPage() {
                     ],
                     onClick: ({ key }) => {
                         if (key === 'save') void handleSave();
-                        if (key === 'versions') openVersions();
+                        if (key === 'versions') sidePanel.show(versionsViewId);
                         if (key === 'export-xlsx') void handleExportXlsx();
                         if (key === 'export') handleExport();
                     },
@@ -533,8 +544,10 @@ export function EditorPage() {
 
     return (
         <AppLayout extra={extra}>
-            <div style={styles.root}>
-                <div style={styles.titleBar}>
+            {/* 主内容 + 侧面板：编辑器自己注册视图，插件面板也落在这里 */}
+            <SidePanelArea readOnly={isReadonly}>
+                <div style={styles.root}>
+                    <div style={styles.titleBar}>
                     <Space size={8}>
                         {renaming ? (
                             <Input
@@ -657,53 +670,8 @@ export function EditorPage() {
                         />
                     )}
                 </div>
-            </div>
-
-            <Drawer
-                title="版本历史"
-                open={versionsOpen}
-                onClose={() => setVersionsOpen(false)}
-                width={420}
-            >
-                <List
-                    loading={versionsLoading}
-                    dataSource={versions}
-                    renderItem={(version) => (
-                        <List.Item
-                            actions={[
-                                <Popconfirm
-                                    key="restore"
-                                    title={`回滚到版本 ${version.versionNo}？`}
-                                    description="回滚会覆盖当前内容（会作为新的一版留档）"
-                                    onConfirm={() => void handleRestore(version.versionNo)}
-                                    okText="回滚"
-                                    cancelText="取消"
-                                    disabled={isReadonly}
-                                >
-                                    <Button size="small" disabled={isReadonly}>
-                                        回滚
-                                    </Button>
-                                </Popconfirm>,
-                            ]}
-                        >
-                            <List.Item.Meta
-                                title={
-                                    <Space>
-                                        <Tag>版本 {version.versionNo}</Tag>
-                                        {version.remark && <Text type="secondary">{version.remark}</Text>}
-                                    </Space>
-                                }
-                                description={
-                                    <Text type="secondary">
-                                        {new Date(version.createdAt).toLocaleString()} ·{' '}
-                                        {formatBytes(version.sizeBytes)}
-                                    </Text>
-                                }
-                            />
-                        </List.Item>
-                    )}
-                />
-            </Drawer>
+                </div>
+            </SidePanelArea>
         </AppLayout>
     );
 }
@@ -740,12 +708,6 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
             }
         );
     });
-}
-
-function formatBytes(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 /** 触发浏览器下载。Blob URL 用完立刻回收，避免内存泄漏 */
