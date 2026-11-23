@@ -11,7 +11,7 @@
 | 项目 | 值 |
 | --- | --- |
 | id | `com.pgclouddoc.ai-agent` |
-| version | `0.2.1` |
+| version | `0.2.2` |
 | entry | `dist/main.js` |
 | 激活事件 | `onView:aiAgent.panel`、`onCommand:aiAgent.open` |
 | 权限 | `document:read`、`document:write`、`storage` |
@@ -143,7 +143,7 @@ Agent 循环在插件里，因为工具必须操作**实时文档**；模型调�
 
 - `ctx.net.fetch()`：同源 HTTP + SSE，复用宿主登录态与 401 单飞刷新；
 - `ctx.settings.get()`：`autoApply`、`contextCellLimit`；
-- `ctx.storage`：记住用户选择的模型（单键，远小于 1 MB）。
+- `ctx.storage`：记住用户选择的模型、每个文档上次打开的会话（单键/小对象，远小于 1 MB）。
 
 ## 外部服务与数据流
 
@@ -189,7 +189,7 @@ Agent 循环在插件里，因为工具必须操作**实时文档**；模型调�
 
 ### 面板生命周期
 
-侧面板关闭会卸载 Preact 树，但 `AgentController` 仍在插件作用域内：关闭时中止在途请求和待确认写入，重新打开时从服务端恢复最近会话。切换文档会重置会话并重新绑定。
+侧面板关闭会卸载 Preact 树，但 `AgentController` 仍在插件作用域内：关闭时中止在途请求和待确认写入，重新打开时从服务端恢复上次选中的会话。切换文档会重置会话并重新绑定。
 
 ## 本地开发
 
@@ -237,8 +237,8 @@ pnpm build:plugin:ai
 产物：
 
 ```text
-plugins/ai-agent/release/com.pgclouddoc.ai-agent-0.2.1.zip
-plugins/ai-agent/release/com.pgclouddoc.ai-agent-0.2.1.json
+plugins/ai-agent/release/com.pgclouddoc.ai-agent-0.2.2.zip
+plugins/ai-agent/release/com.pgclouddoc.ai-agent-0.2.2.json
 ```
 
 zip 由管理后台「插件管理 → 上传插件」上传；版本号不可复用。

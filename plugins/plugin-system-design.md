@@ -237,7 +237,7 @@ csv-tools-1.0.0.zip
 | `onDocumentOpen` | 进入任意文档编辑页 |
 | `onDocumentOpen:sheet` | 进入表格文档 |
 | `onCommand:<commandId>` | 用户点击 manifest 声明的命令（宿主先激活再执行） |
-| `onView:<slotId>` | 用户第一次打开插件贡献的面板 |
+| `onView:<panelId>` | 用户第一次打开插件贡献的面板 |
 
 > 注意：manifest 里声明的命令可以在未激活时渲染按钮；点击时宿主负责"加载 + 激活 + 执行"。这就是 VS Code 的懒激活模型。
 
@@ -1168,7 +1168,7 @@ pnpm dev:plugin            # 另开终端
 | 部署适配（volume / nginx / Dockerfile） | `deploy/`、`backend/Dockerfile`、`frontend/Dockerfile` | 完成 |
 | 上传即发布（管理员信任模型） | 版本状态直接 `PUBLISHED` | 完成 |
 | 审核流 / 签名 / ROLE 灰度 / 遥测 | — | 待后续 |
-| 共享 React import map、菜单/面板渲染 | — | 待后续 |
+| 共享 React import map、菜单渲染（`editor.sidebar` 面板已接入） | — | 待后续 |
 
 建议先把 P0 + P1 做通，用一个真实插件（CSV 工具）跑完"开发 → 上传 → 审核 → 灰度 → 用户使用 → 回滚"全链路，再扩展贡献点和 API。插件 API 一旦对外，兼容性成本远高于实现成本。
 

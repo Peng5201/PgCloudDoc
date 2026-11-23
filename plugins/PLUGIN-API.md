@@ -307,7 +307,7 @@ active ──停用 / 退出登录 / 页面卸载──> disposed
 | `attachDocument()` | 激活声明了 `onDocumentOpen` 或 `onDocumentOpen:sheet` 的插件；索引晚于文档就绪时会补一次 |
 | 点击 manifest 贡献的按钮 | `executeCommand` 前先 `ensureActivated` |
 | `context.commands.execute()` | 同上，先确保插件已激活 |
-| `onView:*` | 未接入 |
+| `onView:<panelId>` | 用户第一次打开 manifest 声明的面板时激活；宿主通过占位视图的 `onFirstShow` 触发，不在启动时扫描 activationEvents |
 | `onCommand:*` | 宿主不做启动时扫描；命令执行链路本身会激活插件 |
 
 ---
@@ -883,7 +883,9 @@ ctx.ui.registerPanel({
 
 **manifest 声明 + 懒激活**
 
-`contributes.panels` 里的面板在插件未激活时就会出现在活动栏，点开时宿主才加载插件代码（对应 `activationEvents: ["onView:<id>"]`）。插件在 `activate` 里调用 `registerPanel` 补上内容即可：
+`contributes.panels` 里的面板在插件未激活时就会出现在活动栏，点开时宿主直接激活插件
+（对应 `onView` 语义；实际由占位视图的 `onFirstShow` 触发，不依赖启动时扫描 activationEvents）。
+插件在 `activate` 里调用 `registerPanel` 补上内容即可：
 
 ```json
 {
@@ -1063,16 +1065,20 @@ manifest `permissions` 允许的值：
 所有文档/命令/存储错误都是 `PluginApiError`，带有可编程判断的 `code`：
 
 ```ts
-import { PluginApiError } from '@pgclouddoc/plugin-api/errors';
-
 try {
   await doc.setRangeValues(range, values);
 } catch (err) {
-  if (err instanceof PluginApiError && err.code === 'E_PLUGIN_READ_ONLY') {
+  // 宿主抛出的错误对象带 code 字段。
+  // v1 没有插件共享运行时，不要运行时 import PluginApiError 类；按 code 判断即可。
+  const code = (err as { code?: string } | null)?.code;
+  if (code === 'E_PLUGIN_READ_ONLY') {
     ctx.ui.showMessage('warning', '当前文档只读');
   }
 }
 ```
+
+> 错误类型定义在 `@pgclouddoc/plugin-api`，但当前宿主没有提供 import map / 共享运行时。
+> 插件只能用 `import type`；错误处理以运行时对象的 `code` 字段为准。
 
 | code | 触发场景 |
 | --- | --- |
@@ -1288,7 +1294,7 @@ JSON.stringify({
 
 ### 14.10 插件自身调用的外部服务
 
-宿主**不提供**网络 API，也**不限制**插件发起网络请求。插件运行在页面 realm 里，可以直接使用：
+宿主提供 `ctx.net.fetch` 作为同源请求的便利入口（复用登录态、单飞刷新），但**不限制**插件直接使用全局 `fetch`。插件运行在页面 realm 里，可以直接使用：
 
 - `fetch` / `XMLHttpRequest` / `WebSocket`；
 - 同源 `/api/...`：请求会携带当前用户的登录 Cookie，**以该用户的身份和权限执行**；
@@ -1397,7 +1403,7 @@ plugins/<plugin>/release/<id>-<version>.json    # zip 与各文件的 SHA-256、
 - [ ] `entry` / `style` / `icon` 指向的文件都在 zip 内
 - [ ] `permissions` 最小化；需要存储才声明 `storage`
 - [ ] manifest 按钮引用的命令都在 `contributes.commands` 中声明
-- [ ] 使用了 `.end` 插槽（v1 的 `.start`、菜单、面板不渲染）
+- [ ] 使用了 `.end` 插槽（v1 的 `.start`、菜单不渲染；面板使用 `editor.sidebar`）
 
 ### 代码
 

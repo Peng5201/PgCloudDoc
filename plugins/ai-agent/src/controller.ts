@@ -873,6 +873,18 @@ function describeToolError(err: unknown): { code: string; message: string } {
     if (err instanceof ToolError) return { code: err.code, message: err.message };
     if (err instanceof AiApiError) return { code: err.code, message: err.message };
     if (isAbortError(err)) return { code: 'CANCELLED', message: '已取消' };
+
+    // 宿主文档 API 抛出的 PluginApiError 带 code；不 import 运行时类，按字段判断
+    if (err && typeof err === 'object' && 'code' in err) {
+        const code = (err as { code?: unknown }).code;
+        if (typeof code === 'string' && code.startsWith('E_PLUGIN_')) {
+            return {
+                code,
+                message: err instanceof Error ? err.message : '插件操作失败',
+            };
+        }
+    }
+
     return {
         code: 'TOOL_ERROR',
         message: err instanceof Error ? err.message : '工具执行失败',

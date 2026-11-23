@@ -73,6 +73,8 @@ src/
     jobs/          Kafka 消费者（归档/审计/死信）+ cron 清理
     notifications/ 站内信 + WS 推送
     config-center/ 配置中心（etcd 读写 + 公共配置快照 + 管理接口）
+    plugins/       插件注册表 / zip 上传校验 / 客户端索引
+    ai/            AI 网关：会话、SSE、Provider 适配、配额与文档访问校验
     health/        liveness / readiness / 依赖详情
 test/              单元测试在 src/ 里随模块；冒烟脚本在 test/
 ```
@@ -337,20 +339,24 @@ test/              单元测试在 src/ 里随模块；冒烟脚本在 test/
 
 ## 测试
 
-**单元测试**（`pnpm test`，32 用例，不需要任何外部服务）
+**单元测试**（`pnpm test`，38 用例，不需要任何外部服务）
 覆盖 Yjs 结构的往返一致性与并发合并语义（13）、双 token 的签发/校验/哈希（11）、
-xlsx 往返/样式去重/共享公式/单元格上限（8）。
+xlsx 往返/样式去重/共享公式/单元格上限（8）、AI 网关的 SSE 解析/工具调用/会话流程/DTO 回归（6）。
 
 **冒烟脚本**（`pnpm test:smoke`，打真实服务）
 - `test/http.smoke.mjs` —— 43 项：健康检查、注册登录、CRUD、ETag/304、版本回滚、越权 404、令牌轮换与重放检测、软删除
 - `test/collab.smoke.mjs` —— 双客户端双向同步 + 并发同格不同字段 + 落库一致性
+- `test/ai.smoke.mjs` —— AI 配置、建会话、SSE（文本 + tool_call）、工具结果轮、会话恢复、清理；
+  需要后端以 `AI_PROVIDER=mock` 启动（默认打 `http://localhost:3100`，可用 `SMOKE_BASE` 覆盖），
+  也可以直接跑 `pnpm test:smoke:ai`
 
 ### 为什么没有 supertest 的 e2e
 
 Nest 12 发布的是**纯 ESM 包**（`package.json` 里 `type: module`，无 CJS 入口）。
-jest 30 在 Node 22 上的 `require()` 实现不支持 `require(esm)`，
-`Test.createTestingModule` 装不进来（transform 帮不上忙 —— jest 是按 package.json 的
-`type` 决定加载方式的）。Node 24.9+ 才原生支持。
+Node 22 本身已经支持 `require(esm)`（`@pgclouddoc/ai-protocol` 就依赖这个能力），
+但 **jest 30 自己的模块加载器**还不支持；官方提示 Node 24.9+ 的 Jest 才原生支持。
+`Test.createTestingModule` 在 Node 22 的 jest 里装不进来（transform 帮不上忙 —— jest 是按 package.json 的
+`type` 决定加载方式的）。
 
 所以单元测试只测**无框架依赖的纯逻辑**（`TokenIssuer` 因此从 `TokenService` 里抽了出来），
 端到端走打真实 HTTP 的冒烟脚本 —— 反而更接近生产路径，中间件/Guard/过滤器/缓存头全都真跑。
@@ -378,5 +384,7 @@ jest 30 在 Node 22 上的 `require()` 实现不支持 `require(esm)`，
 - 令牌轮换与重放检测：[src/features/auth/auth.service.ts](src/features/auth/auth.service.ts)
 - 事务性发件箱：[src/infrastructure/kafka/outbox.service.ts](src/infrastructure/kafka/outbox.service.ts)
 - 文件格式契约：[src/features/documents/formats/types.ts](src/features/documents/formats/types.ts)
+- AI 网关：[src/features/ai/](src/features/ai/)
+- AI 会话迁移：[prisma/migrations/20261101000000_ai_conversations/migration.sql](prisma/migrations/20261101000000_ai_conversations/migration.sql)
 - xlsx 实现说明：[src/features/documents/formats/xlsx/README.md](src/features/documents/formats/xlsx/README.md)
 - xlsx 类型边界：[src/features/documents/formats/xlsx/DATA-TYPES.md](src/features/documents/formats/xlsx/DATA-TYPES.md)

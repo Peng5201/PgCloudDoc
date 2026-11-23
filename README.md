@@ -65,7 +65,7 @@ PgCloudDoc/
 │   │   ├── config/         环境变量 zod 校验 + 分层配置
 │   │   ├── shared/         横切：中间件 / 异常过滤器 / 拦截器 / Guard / 装饰器 / 错误码 / 请求上下文
 │   │   ├── infrastructure/  外部系统适配：prisma · redis · kafka（含事务性发件箱） · yjs · etcd
-│   │   └── features/       业务能力：auth · users · documents（含 formats/ 工作簿文件格式） · collab · jobs · notifications · config-center · health
+│   │   └── features/       业务能力：auth · users · documents（含 formats/ 工作簿文件格式） · collab · jobs · notifications · config-center · plugins · ai · health
 │   ├── kafka/        Kafka 单节点配置（开发用）
 │   ├── Dockerfile    多阶段构建：deps → build → prod-deps → migrator → runtime
 │   ├── test/         集成冒烟脚本
@@ -82,9 +82,18 @@ PgCloudDoc/
 │   │   ├── app/config/       运行时配置（首屏前加载 + 反序列化）
 │   │   ├── app/admin/        配置中心管理后台（/admin）
 │   │   ├── app/spreadsheet/  自研表格引擎（canvas 渲染 + 撤销重做）
+│   │   ├── app/plugins/      插件宿主：索引、懒激活、文档 API、侧面板
 │   │   └── shared/           共享组件（如应用外壳 AppLayout）
 │   ├── Dockerfile    nginx + 静态产物
 │   └── test/         单测 + 集成冒烟
+│
+├── packages/         跨端共享协议包（不参与业务运行时）
+│   ├── plugin-api/   插件系统接口标准
+│   └── ai-protocol/  AI 助手前后端协议
+│
+├── plugins/          浏览器插件源码
+│   ├── csv-tools/    CSV 工具示例
+│   └── ai-agent/     AI 助手（Agent 侧面板 + 表格工具）
 │
 ├── deploy/           生产部署
 │   ├── deploy.mjs             一键部署脚本
@@ -161,10 +170,14 @@ pnpm dev
 # 单元测试（不需要任何服务在跑）
 pnpm --filter backend test          # 后端纯逻辑
 pnpm --filter frontend test         # 前端单测
+pnpm --filter @pgclouddoc/plugin-ai-agent test   # AI 插件工具 / 控制器
 
 # 集成冒烟（需要后端、前端都启动好）
 pnpm --filter backend test:smoke    # REST 全链路 + 协同全链路
 pnpm --filter frontend test:smoke   # 经 vite 代理的完整接入链路
+
+# AI 冒烟（后端以 AI_PROVIDER=mock 启在 3100 时）
+pnpm --filter backend test:smoke:ai
 ```
 
 冒烟脚本打的是**真实服务**，会建真实用户和文档，多次运行用时间戳做标识、互不干扰。
@@ -222,6 +235,36 @@ node deploy/deploy.mjs --port 8080                        # web 发布到 8080
 | 停止（保留数据） | `pnpm deploy:down` |
 | 停止并清空所有数据 | `node deploy/deploy.mjs --down --reset` |
 | 回滚到上一个镜像 | `node deploy/deploy.mjs --tag <旧标签> --no-build` |
+
+#### 启用 AI 助手（可选）
+
+AI 助手由 `plugins/ai-agent` 插件 + 后端 `/api/v1/ai` 网关组成，模型调用在服务端。
+默认 `AI_API_KEY` 为空 = 功能关闭。
+
+1. 在 `deploy/.env.production` 配置：
+
+   ```dotenv
+   AI_ENABLED=true
+   AI_PROVIDER=anthropic
+   AI_BASE_URL=https://api.deepseek.com/anthropic
+   AI_API_KEY=sk-...
+   AI_MODEL=deepseek-v4-flash
+   AI_MODELS=deepseek-v4-flash
+   ```
+
+2. 重启后端让环境变量生效：`node deploy/deploy.mjs --no-build`。
+3. 构建并上传插件：
+
+   ```bash
+   pnpm build:plugin:ai
+   ```
+
+   在管理后台「插件管理 → 上传插件」上传 `plugins/ai-agent/release/com.pgclouddoc.ai-agent-*.zip`。
+
+4. 本地联调可先在 `backend/.env` 配置同一组变量，运行 `cd backend && pnpm ai:probe`
+   验证流式 + 原生工具调用；也可以用 `AI_PROVIDER=mock` 不接外部模型跑通全链路。
+
+密钥只存在服务端环境变量，插件包和浏览器拿不到。
 
 #### 数据备份
 
